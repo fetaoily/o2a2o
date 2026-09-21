@@ -11,7 +11,8 @@
     "package:win": "bun scripts/package-windows.mjs",
     "package:linux": "bun scripts/package-linux.mjs",
     "package:mac": "bun scripts/package-macos.mjs",
-    "package:all": "bun scripts/package-all.mjs"
+    "package:all": "bun scripts/package-all.mjs",
+    "release:rc": "bun scripts/release-rc.mjs"
   },
   "dependencies": {
     "yaml": "^2.5.0"
