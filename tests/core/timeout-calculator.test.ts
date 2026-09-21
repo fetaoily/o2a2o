@@ -20,8 +20,14 @@ test("by_model overrides estimation", () => {
 test("stream skips token estimation (min floor still applies)", () =>
   expect(calculateTimeout({ model: "m", maxTokens: 100000, isStream: true, tc })).toBe(60000)); // default
 
-test("adaptive: 3x avg latency raises floor", () => {
+test("adaptive: 3x avg latency raises floor above base", () => {
   const lt = new LatencyTracker();
-  for (let i = 0; i < 5; i++) lt.record("slow", 20000);   // avg 20s -> 60s
-  expect(calculateTimeout({ model: "slow", maxTokens: 100, isStream: true, tc, tracker: lt })).toBe(60000);
+  for (let i = 0; i < 5; i++) lt.record("slow", 25000);   // avg 25s -> floor 75s > 60s default
+  expect(calculateTimeout({ model: "slow", maxTokens: 100, isStream: true, tc, tracker: lt })).toBe(75000);
+});
+
+test("adaptive floor is capped by by_request.max", () => {
+  const lt = new LatencyTracker();
+  for (let i = 0; i < 5; i++) lt.record("slow", 200000);  // 3x = 600s > max 300s
+  expect(calculateTimeout({ model: "slow", maxTokens: 100, isStream: true, tc, tracker: lt })).toBe(300000);
 });
