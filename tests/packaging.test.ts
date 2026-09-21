@@ -83,6 +83,34 @@ describe("linux deb/rpm", () => {
       expect(statSync(path).size).toBeGreaterThan(0);
     }
   });
+
+  // ar-level structural check (pure JS, names only): a deb is an ar archive
+  // carrying the three canonical members. The inner tars may be compressed
+  // with any codec, so only member NAMES are asserted, never decompressed.
+  function arMemberNames(deb: Buffer): string[] {
+    expect(deb.subarray(0, 8).toString("utf8")).toBe("!<arch>\n");
+    const names: string[] = [];
+    let off = 8;
+    while (off + 60 <= deb.length) {
+      names.push(deb.toString("utf8", off, off + 16).trim());
+      const size = parseInt(deb.toString("utf8", off + 48, off + 58).trim(), 10);
+      if (!Number.isFinite(size) || size < 0) throw new Error(`ar: bad member size at offset ${off}`);
+      off += 60 + size + (size % 2);
+    }
+    // members must tile the file exactly — catches truncated archives whose
+    // headers all survived
+    expect(off).toBe(deb.length);
+    return names;
+  }
+
+  test.skipIf(!nfpmAvailable)("deb has canonical ar members (debian-binary, control.tar*, data.tar*)", () => {
+    for (const arch of ["amd64", "arm64"] as const) {
+      const names = arMemberNames(readFileSync(join(installers, `o2a2o_${v}_linux-${arch}.deb`)));
+      expect(names).toContain("debian-binary");
+      expect(names.some((n) => n.startsWith("control.tar"))).toBe(true);
+      expect(names.some((n) => n.startsWith("data.tar"))).toBe(true);
+    }
+  });
 });
 
 describe("linux tarballs", () => {

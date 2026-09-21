@@ -26,20 +26,25 @@ export async function ensureNfpm(root: string): Promise<string> {
   mkdirSync(toolsDir, { recursive: true });
 
   let zip: Buffer;
+  let cached = false;
   if (existsSync(zipPath)) {
     zip = readFileSync(zipPath);
+    cached = true;
   } else {
     console.log(`downloading ${NFPM_ZIP_URL}`);
     const res = await fetch(NFPM_ZIP_URL);
     if (!res.ok) throw new Error(`nfpm download failed: HTTP ${res.status}`);
     zip = Buffer.from(await res.arrayBuffer());
-    writeFileSync(zipPath, zip);
   }
 
+  // Verify before caching: a poisoned 200-response never lands in the cache,
+  // and a cached file is re-verified on every use.
   const actual = createHash("sha256").update(zip).digest("hex");
   if (actual !== NFPM_ZIP_SHA256) {
     throw new Error(`nfpm zip sha256 mismatch: expected ${NFPM_ZIP_SHA256}, got ${actual}`);
   }
+  if (!cached) writeFileSync(zipPath, zip);
+
   const exe = extractZipEntry(zip, "nfpm.exe");
   writeFileSync(exePath, exe, { mode: 0o755 });
   return exePath;

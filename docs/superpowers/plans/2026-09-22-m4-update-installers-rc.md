@@ -97,7 +97,7 @@ export class UpdateManager {
 - Test: 打包为脚本型任务——验证方式 = 实跑产物存在性 + 结构断言（deb 系内文件清单、nsi 产物存在、tarball 内容清单），写入 `tests/packaging.test.ts`（跳过条件：平台不匹配的工具跳过对应断言）
 
 **Interfaces:**
-- 产物（RC 资产集）：`o2a2o_v0.3.0-rc.1_{windows-x64-setup.exe|windows-x64.zip}`、`o2a2o_v0.3.0-rc.1_linux-{amd64,arm64}.deb`、`_linux-{amd64,arm64}.rpm`、`_linux_{amd64,arm64}.tar.gz`、`_macos-{arm64,x64}.tar.gz`（按 spike 裁定裁剪）
+- 产物（RC 资产集）：`o2a2o_v0.3.0-rc.1_{windows-x64-setup.exe|windows-x64.zip}`、`o2a2o_v0.3.0-rc.1_linux-{amd64,arm64}.deb`、`_linux-{amd64,arm64}.rpm`、`_linux-{amd64,arm64}.tar.gz`、`_macos-{arm64,x64}.tar.gz`（按 spike 裁定裁剪）
 - Linux 包内容：二进制 → `/usr/local/bin/o2a2o`，`o2a2o.service`（simple 服务，EnvironmentFile 可选）→ `/etc/systemd/system/`
 - Windows：exe → 安装目录 + 可选 PATH 注册（安装脚本/NSIS 内）
 - [ ] 实现 + 实跑断言 → Commit `feat(build): native installers for windows linux macos`

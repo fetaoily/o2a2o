@@ -90,7 +90,9 @@ export function writeZip(entries: ArchiveEntry[]): Buffer {
     ch.writeUInt32LE(payload.length, 20);
     ch.writeUInt32LE(data.length, 24);
     ch.writeUInt16LE(nameBuf.length, 28);
-    ch.writeUInt32LE((mode & 0xffff) << 16, 38); // external attrs: unix mode
+    // external attrs: S_IFREG | unix mode. `<<` yields a signed int32 and
+    // S_IFREG sets bit 15 of the high word, so re-interpret with >>> 0.
+    ch.writeUInt32LE((((0o100000 | mode) & 0xffff) << 16) >>> 0, 38);
     ch.writeUInt32LE(offset, 42); // local header offset
     central.push(ch, nameBuf);
 
