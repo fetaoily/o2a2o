@@ -75,7 +75,7 @@ Usage:
   o2a2o config init                            print a starter config template to stdout
   o2a2o config validate <path>                 validate a config file
   o2a2o config routes                          list models, aliases and masked keys (config: ${DEFAULT_CONFIG_PATH})
-  o2a2o convert --input <path> [--to <fmt>]  convert a request body between protocols
+  o2a2o convert --input <path> [--to <fmt>]    convert a request body between protocols
   o2a2o version                                print the version
   o2a2o help                                   show this help`);
 }
@@ -151,7 +151,7 @@ async function convertCommand(parsed: Extract<CliCommand, { cmd: "convert" }>): 
     console.error("convert requires --input <path>");
     return 1;
   }
-  if (parsed.to !== undefined && !(parsed.to in CONVERT_COUNTERPART)) {
+  if (parsed.to !== undefined && !Object.hasOwn(CONVERT_COUNTERPART, parsed.to)) {
     console.error(`invalid --to value: ${parsed.to} (expected openai_chat, openai_responses or anthropic)`);
     return 1;
   }

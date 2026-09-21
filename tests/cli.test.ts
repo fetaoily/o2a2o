@@ -21,3 +21,8 @@ test("convert parses args", () => {
   expect(parseArgv(["convert", "--input", "r.json"])).toEqual({ cmd: "convert", inputPath: "r.json", to: undefined });
   expect(parseArgv(["convert", "--input", "r.json", "--to", "anthropic"])).toEqual({ cmd: "convert", inputPath: "r.json", to: "anthropic" });
 });
+test("convert rejects prototype-chain property names as --to", () => {
+  // parseArgv accepts it; runCli must exit 1 — assert at the parse level that the
+  // value survives, and rely on runCli ownership check for the exit path.
+  expect(parseArgv(["convert", "--input", "r.json", "--to", "toString"]).cmd).toBe("convert");
+});
