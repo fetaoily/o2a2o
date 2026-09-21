@@ -60,7 +60,9 @@ test("stream:true maps into ir.stream (streaming no longer rejected)", () => {
 });
 
 test("url-source image to anthropic is skipped and recorded", () => {
+  const dropped: string[] = [];
   const out = irToAnthropic({ model: "m", messages: [{ role: "user", content: [
-    { type: "image", mediaType: "url", data: "https://x/img.png" } as any] }], maxTokens: 10, stream: false }) as any;
+    { type: "image", mediaType: "url", data: "https://x/img.png" } as any] }], maxTokens: 10, stream: false }, dropped) as any;
   expect(out.messages[0].content).toEqual([]);   // no broken image block reaches anthropic
+  expect(dropped).toContain("image_url");
 });
