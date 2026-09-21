@@ -7,11 +7,6 @@ import type { StreamEvent } from "./stream-chat";
 
 type TokenUsage = { inputTokens: number; outputTokens: number };
 
-// output_index of the most recent function_call item, reused by its
-// response.function_call_arguments.delta events (those events carry no
-// index of their own). Reset on response.created, i.e. once per stream.
-let lastToolIndex = 0;
-
 // Builds the end event from a response envelope, attaching usage when the
 // envelope carries one.
 function endEvent(stopReason: "stop" | "length" | "content_filter", response: any): StreamEvent {
@@ -28,56 +23,80 @@ function endEvent(stopReason: "stop" | "length" | "content_filter", response: an
   };
 }
 
-// Parses one upstream data-line payload into semantic events. The minimal
-// viable mapping per the plan ruling; events without a semantic equivalent
-// (lifecycle, reasoning, item done events) produce nothing, and unknown
-// event types are tolerated with a debug log (official guidance: new event
-// types may appear at any time).
+// Parses openai_responses SSE events into semantic events. Instantiate one
+// parser per upstream stream: it carries the output_index of the most recent
+// function_call item so its response.function_call_arguments.delta events
+// can be attributed to it (those events carry no index of their own).
+// Sharing one instance between concurrent streams would cross-contaminate
+// that index.
+export class ResponsesSseParser {
+  private lastToolIndex = 0;
+
+  // No construction-time metadata: all state is per-stream instance state.
+  constructor() {}
+
+  // Parses one upstream data-line payload into semantic events. The minimal
+  // viable mapping per the plan ruling; events without a semantic
+  // equivalent (lifecycle, reasoning, item done events) produce nothing,
+  // and unknown event types are tolerated with a debug log (official
+  // guidance: new event types may appear at any time).
+  parseEvent(data: string): StreamEvent[] {
+    let parsed: any;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      console.warn("[openai_responses] dropping malformed stream event: not valid JSON");
+      return [];
+    }
+    if (parsed === null || typeof parsed !== "object") {
+      console.warn("[openai_responses] dropping malformed stream event: not an object");
+      return [];
+    }
+    switch (parsed.type) {
+      case "response.created":
+        this.lastToolIndex = 0;
+        return [];
+      case "response.output_text.delta":
+        return typeof parsed.delta === "string" && parsed.delta !== ""
+          ? [{ type: "text_delta", text: parsed.delta }]
+          : [];
+      case "response.output_item.added": {
+        const item = parsed.item;
+        if (item?.type !== "function_call") return [];
+        const index = typeof parsed.output_index === "number" ? parsed.output_index : 0;
+        this.lastToolIndex = index;
+        return [{ type: "tool_start", index, id: String(item.call_id ?? ""), name: String(item.name ?? "") }];
+      }
+      case "response.function_call_arguments.delta":
+        return typeof parsed.delta === "string" && parsed.delta !== ""
+          ? [{ type: "tool_delta", index: this.lastToolIndex, partialJson: parsed.delta }]
+          : [];
+      case "response.completed":
+        return [endEvent("stop", parsed.response)];
+      case "response.incomplete": {
+        const reason = parsed.response?.incomplete_details?.reason;
+        return [endEvent(reason === "max_output_tokens" ? "length" : "stop", parsed.response)];
+      }
+      case "response.failed":
+        return [endEvent("content_filter", parsed.response)];
+      case "error":
+        return [{ type: "error", message: String(parsed.message ?? parsed.code ?? "unknown error") }];
+      default:
+        console.debug(`[openai_responses] dropping stream event without mapping: ${String(parsed.type)}`);
+        return [];
+    }
+  }
+}
+
+// Bare-function wrapper bound to one module-level parser instance. It keeps
+// the pre-refactor cross-call semantics that the brief's verbatim tests rely
+// on (output_item.added setting the tool index for later arguments delta
+// calls); stream loops should instantiate ResponsesSseParser once per stream
+// instead.
+const defaultParser = new ResponsesSseParser();
+
 export function parseResponsesEvent(data: string): StreamEvent[] {
-  let parsed: any;
-  try {
-    parsed = JSON.parse(data);
-  } catch {
-    console.warn("[openai_responses] dropping malformed stream event: not valid JSON");
-    return [];
-  }
-  if (parsed === null || typeof parsed !== "object") {
-    console.warn("[openai_responses] dropping malformed stream event: not an object");
-    return [];
-  }
-  switch (parsed.type) {
-    case "response.created":
-      lastToolIndex = 0;
-      return [];
-    case "response.output_text.delta":
-      return typeof parsed.delta === "string" && parsed.delta !== ""
-        ? [{ type: "text_delta", text: parsed.delta }]
-        : [];
-    case "response.output_item.added": {
-      const item = parsed.item;
-      if (item?.type !== "function_call") return [];
-      const index = typeof parsed.output_index === "number" ? parsed.output_index : 0;
-      lastToolIndex = index;
-      return [{ type: "tool_start", index, id: String(item.call_id ?? ""), name: String(item.name ?? "") }];
-    }
-    case "response.function_call_arguments.delta":
-      return typeof parsed.delta === "string" && parsed.delta !== ""
-        ? [{ type: "tool_delta", index: lastToolIndex, partialJson: parsed.delta }]
-        : [];
-    case "response.completed":
-      return [endEvent("stop", parsed.response)];
-    case "response.incomplete": {
-      const reason = parsed.response?.incomplete_details?.reason;
-      return [endEvent(reason === "max_output_tokens" ? "length" : "stop", parsed.response)];
-    }
-    case "response.failed":
-      return [endEvent("content_filter", parsed.response)];
-    case "error":
-      return [{ type: "error", message: String(parsed.message ?? parsed.code ?? "unknown error") }];
-    default:
-      console.debug(`[openai_responses] dropping stream event without mapping: ${String(parsed.type)}`);
-      return [];
-  }
+  return defaultParser.parseEvent(data);
 }
 
 // The item currently being streamed: one message item for text, one
@@ -99,9 +118,7 @@ interface OpenItem {
 // response.function_call_arguments.delta for tools and an error frame.
 // The envelope (id / object / created_at / model) lives inside each event's
 // embedded response object (section 10), so id and model are synthesized
-// here (plumbing of real values is a later task). finish() always terminates
-// with response.completed per the minimal ruling; the stopReason argument is
-// accepted for signature stability and not yet reflected in the wire.
+// here (plumbing of real values is a later task).
 export class ResponsesStreamEncoder {
   private readonly id = `resp_${crypto.randomUUID()}`;
   private readonly model = "unknown";
@@ -175,7 +192,7 @@ export class ResponsesStreamEncoder {
         });
       }
       case "end":
-        // response.completed goes out from finish().
+        // The termination event goes out from finish().
         return "";
       case "error":
         // Mid-stream errors surface as an error event (section 10); the

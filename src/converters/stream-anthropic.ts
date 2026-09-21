@@ -6,77 +6,96 @@ import { encodeSse } from "../core/sse";
 import { IR_TO_STOP, STOP_TO_IR } from "./anthropic";
 import type { StreamEvent } from "./stream-chat";
 
-// input_tokens reported by message_start, surfaced on the end event built
-// from message_delta: anthropic splits usage across the two events (start
-// carries input_tokens, message_delta the cumulative output_tokens). Reset
-// on every message_start, i.e. once per stream.
-let streamInputTokens = 0;
+// Parses anthropic message SSE frames into semantic events. Instantiate one
+// parser per upstream stream: it carries the input_tokens reported by
+// message_start so the end event built from message_delta can include it
+// (anthropic splits usage across the two events). Sharing one instance
+// between concurrent streams would cross-contaminate that stash.
+export class AnthropicSseParser {
+  private streamInputTokens = 0;
 
-// Parses one upstream event frame (event name + data payload) into semantic
-// events. Transport-only events (message_stop, ping) and events without a
-// semantic equivalent (text block lifecycle, thinking deltas) produce
-// nothing; unknown event types are tolerated with a debug log (official
-// guidance: new event types may appear at any time).
-export function parseAnthropicEvent(event: string | undefined, data: string): StreamEvent[] {
-  let parsed: any;
-  try {
-    parsed = JSON.parse(data);
-  } catch {
-    console.warn("[anthropic] dropping malformed stream event: not valid JSON");
-    return [];
-  }
-  if (parsed === null || typeof parsed !== "object") {
-    console.warn("[anthropic] dropping malformed stream event: not an object");
-    return [];
-  }
-  const type = typeof parsed.type === "string" ? parsed.type : event;
-  switch (type) {
-    case "message_start": {
-      const inputTokens = parsed.message?.usage?.input_tokens;
-      streamInputTokens = typeof inputTokens === "number" ? inputTokens : 0;
-      return [{ type: "start" }];
+  // No construction-time metadata: all state is per-stream instance state.
+  constructor() {}
+
+  // Parses one upstream event frame (event name + data payload) into
+  // semantic events. Transport-only events (message_stop, ping,
+  // content_block_stop) and events without a semantic equivalent (text
+  // block lifecycle, thinking deltas) produce nothing; unknown event types
+  // are tolerated with a debug log (official guidance: new event types may
+  // appear at any time).
+  parseEvent(event: string | undefined, data: string): StreamEvent[] {
+    let parsed: any;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      console.warn("[anthropic] dropping malformed stream event: not valid JSON");
+      return [];
     }
-    case "content_block_start": {
-      const block = parsed.content_block;
-      if (block?.type !== "tool_use") {
-        if (block?.type !== undefined && block?.type !== "text")
-          console.debug(`[anthropic] dropping unsupported content block type: ${String(block.type)}`);
+    if (parsed === null || typeof parsed !== "object") {
+      console.warn("[anthropic] dropping malformed stream event: not an object");
+      return [];
+    }
+    const type = typeof parsed.type === "string" ? parsed.type : event;
+    switch (type) {
+      case "message_start": {
+        const inputTokens = parsed.message?.usage?.input_tokens;
+        this.streamInputTokens = typeof inputTokens === "number" ? inputTokens : 0;
+        return [{ type: "start" }];
+      }
+      case "content_block_start": {
+        const block = parsed.content_block;
+        if (block?.type !== "tool_use") {
+          if (block?.type !== undefined && block?.type !== "text")
+            console.debug(`[anthropic] dropping unsupported content block type: ${String(block.type)}`);
+          return [];
+        }
+        return [{
+          type: "tool_start",
+          index: typeof parsed.index === "number" ? parsed.index : 0,
+          id: String(block.id ?? ""),
+          name: String(block.name ?? ""),
+        }];
+      }
+      case "content_block_delta": {
+        const delta = parsed.delta;
+        const index = typeof parsed.index === "number" ? parsed.index : 0;
+        if (delta?.type === "text_delta" && typeof delta.text === "string" && delta.text !== "")
+          return [{ type: "text_delta", text: delta.text }];
+        if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string" && delta.partial_json !== "")
+          return [{ type: "tool_delta", index, partialJson: delta.partial_json }];
+        if (delta?.type !== undefined)
+          console.debug(`[anthropic] dropping unsupported delta type: ${String(delta.type)}`);
         return [];
       }
-      return [{
-        type: "tool_start",
-        index: typeof parsed.index === "number" ? parsed.index : 0,
-        id: String(block.id ?? ""),
-        name: String(block.name ?? ""),
-      }];
+      case "content_block_stop":
+        return [];
+      case "message_delta": {
+        const stopReason = STOP_TO_IR[parsed.delta?.stop_reason ?? ""] ?? "stop";
+        const outputTokens = parsed.usage?.output_tokens;
+        return typeof outputTokens === "number"
+          ? [{ type: "end", stopReason, usage: { inputTokens: this.streamInputTokens, outputTokens } }]
+          : [{ type: "end", stopReason }];
+      }
+      case "message_stop":
+      case "ping":
+        return [];
+      case "error":
+        return [{ type: "error", message: String(parsed.error?.message ?? "") }];
+      default:
+        console.debug(`[anthropic] dropping unknown stream event: ${String(type)}`);
+        return [];
     }
-    case "content_block_delta": {
-      const delta = parsed.delta;
-      const index = typeof parsed.index === "number" ? parsed.index : 0;
-      if (delta?.type === "text_delta" && typeof delta.text === "string" && delta.text !== "")
-        return [{ type: "text_delta", text: delta.text }];
-      if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string" && delta.partial_json !== "")
-        return [{ type: "tool_delta", index, partialJson: delta.partial_json }];
-      if (delta?.type !== undefined)
-        console.debug(`[anthropic] dropping unsupported delta type: ${String(delta.type)}`);
-      return [];
-    }
-    case "message_delta": {
-      const stopReason = STOP_TO_IR[parsed.delta?.stop_reason ?? ""] ?? "stop";
-      const outputTokens = parsed.usage?.output_tokens;
-      return typeof outputTokens === "number"
-        ? [{ type: "end", stopReason, usage: { inputTokens: streamInputTokens, outputTokens } }]
-        : [{ type: "end", stopReason }];
-    }
-    case "message_stop":
-    case "ping":
-      return [];
-    case "error":
-      return [{ type: "error", message: String(parsed.error?.message ?? "") }];
-    default:
-      console.debug(`[anthropic] dropping unknown stream event: ${String(type)}`);
-      return [];
   }
+}
+
+// Bare-function wrapper bound to one module-level parser instance. It keeps
+// the pre-refactor cross-call semantics that the brief's verbatim tests rely
+// on (message_start stashing input_tokens for a later message_delta call);
+// stream loops should instantiate AnthropicSseParser once per stream instead.
+const defaultParser = new AnthropicSseParser();
+
+export function parseAnthropicEvent(event: string | undefined, data: string): StreamEvent[] {
+  return defaultParser.parseEvent(event, data);
 }
 
 type StopReason = Extract<StreamEvent, { type: "end" }>["stopReason"];
