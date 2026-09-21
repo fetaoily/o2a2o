@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { loadConfig, ConfigError, resolveTimeoutConfig, resolveFailoverConfig } from "../../src/config/loader";
+import { loadConfig, ConfigError, resolveTimeoutConfig, resolveFailoverConfig, resolveUpdateConfig } from "../../src/config/loader";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -101,4 +101,27 @@ test("failover section loads explicit values over defaults", async () => {
   expect(f.max_retries).toBe(5);
   expect(f.cooldown_ms).toBe(60000);
   expect(f.failure_threshold).toBe(3);
+});
+
+test("update section loads with defaults when absent", async () => {
+  const p = join(dir, "u1.yaml");
+  writeFileSync(p, 'server: { port: 1, host: "127.0.0.1" }\nmodels: [{ name: "m", provider: "openai", api_keys: [{ key: "k", priority: 1 }] }]\n');
+  const cfg = await loadConfig(p);
+  expect(resolveUpdateConfig(cfg)).toEqual({
+    enabled: true,
+    repo: "fetaoily/o2a2o",
+    check_on_start: true,
+    allow_prerelease: true,
+  });
+});
+
+test("update section loads explicit values over defaults", async () => {
+  const p = join(dir, "u2.yaml");
+  writeFileSync(p, 'update:\n  enabled: false\n  repo: "acme/other"\n');
+  const cfg = await loadConfig(p);
+  const u = resolveUpdateConfig(cfg);
+  expect(u.enabled).toBe(false);
+  expect(u.repo).toBe("acme/other");
+  expect(u.check_on_start).toBe(true);
+  expect(u.allow_prerelease).toBe(true);
 });

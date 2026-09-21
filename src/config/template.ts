@@ -54,9 +54,10 @@ timeout:
     idle_grace_period: 5000
     total_max: 600000
 
-# Self-update (implemented in M4):
-# update:
-#   enabled: true
-#   repo: "fetaoily/o2a2o"      # GitHub repo serving Releases
-#   check_on_start: true
+# Self-update via GitHub Releases (o2a2o update)
+update:
+  enabled: true
+  repo: "fetaoily/o2a2o"      # GitHub repo serving Releases
+  check_on_start: true        # print a notice on serve when a newer release exists
+  allow_prerelease: true
 `;

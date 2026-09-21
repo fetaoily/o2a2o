@@ -29,6 +29,12 @@ export interface FailoverConfig {
   latency_window: number;
   recovery_successes: number;
 }
+export interface UpdateConfig {
+  enabled: boolean;
+  repo: string;
+  check_on_start: boolean;
+  allow_prerelease: boolean;
+}
 export interface AppConfig {
   server: ServerConfig;
   models: ModelConfig[];
@@ -36,6 +42,7 @@ export interface AppConfig {
   api_keys: { openai?: string; anthropic?: string };
   timeout?: TimeoutConfig;
   failover?: FailoverConfig;
+  update?: UpdateConfig;
 }
 
 const ENV_REF = /^\$\{(.+)\}$/;
@@ -119,4 +126,15 @@ const FAILOVER_DEFAULTS: FailoverConfig = {
 
 export function resolveFailoverConfig(cfg: AppConfig): FailoverConfig {
   return { ...FAILOVER_DEFAULTS, ...(cfg.failover ?? {}) };
+}
+
+const UPDATE_DEFAULTS: UpdateConfig = {
+  enabled: true,
+  repo: "fetaoily/o2a2o",
+  check_on_start: true,
+  allow_prerelease: true,
+};
+
+export function resolveUpdateConfig(cfg: AppConfig): UpdateConfig {
+  return { ...UPDATE_DEFAULTS, ...(cfg.update ?? {}) };
 }

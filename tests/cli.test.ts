@@ -16,6 +16,9 @@ test("version and unknown", () => {
   expect(parseArgv(["version"]).cmd).toBe("version");
   expect(parseArgv(["wat"]).cmd).toBe("help");
 });
+test("update parses", () => {
+  expect(parseArgv(["update"])).toEqual({ cmd: "update" });
+});
 test("parsePort warns and ignores non-numeric", () => {
   expect(parsePort("abc")).toBeUndefined();
   expect(parsePort("9090")).toBe(9090);

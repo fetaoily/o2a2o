@@ -1,7 +1,7 @@
 // CLI entry: hand-rolled argv scanner plus the serve / config / convert /
 // version / help command implementations. No argument-parsing dependency.
 import { readFile } from "node:fs/promises";
-import { loadConfig, type AppConfig } from "./config/loader";
+import { loadConfig, resolveUpdateConfig, type AppConfig, type UpdateConfig } from "./config/loader";
 import { validateConfig, CONFIG_TEMPLATE } from "./config/validator";
 import { startGateway } from "./server";
 import { maskKey, setLogLevel } from "./utils/logger";
@@ -10,6 +10,8 @@ import type { IRRequest } from "./types/ir";
 import { chatToIr, irToChat, type ConvResult } from "./converters/chat";
 import { responsesToIr, irToResponses } from "./converters/responses";
 import { anthropicToIr, irToAnthropic } from "./converters/anthropic";
+import type { ReleaseInfo } from "./update/github-releases";
+import { UpdateManager } from "./update/update-manager";
 import pkg from "../package.json";
 
 // Single source of truth: package.json, inlined at bundle time so compiled
@@ -21,6 +23,7 @@ export type CliCommand =
   | { cmd: "serve"; configPath: string; port?: number }
   | { cmd: "config"; sub: "init" | "validate" | "routes"; configPath?: string }
   | { cmd: "convert"; inputPath: string; to?: InputFormat }
+  | { cmd: "update" }
   | { cmd: "version" }
   | { cmd: "help" };
 
@@ -32,6 +35,7 @@ export function parsePort(v: string): number | undefined {
 export function parseArgv(argv: string[]): CliCommand {
   const first = argv[0] ?? "";
   if (first === "version") return { cmd: "version" };
+  if (first === "update") return { cmd: "update" };
   if (first === "config") {
     const sub = argv[1];
     if (sub === "init") return { cmd: "config", sub: "init", configPath: undefined };
@@ -79,6 +83,7 @@ Usage:
   o2a2o config validate <path>                 validate a config file
   o2a2o config routes                          list models, aliases and masked keys (config: ${DEFAULT_CONFIG_PATH})
   o2a2o convert --input <path> [--to <fmt>]    convert a request body between protocols
+  o2a2o update                                 check GitHub Releases and self-update the binary
   o2a2o version                                print the version
   o2a2o help                                   show this help`);
 }
@@ -99,6 +104,9 @@ async function serveCommand(configPath: string, port?: number): Promise<number> 
   if (port !== undefined) cfg.server.port = port;
   startGateway(cfg);
   console.log(`http://${cfg.server.host}:${cfg.server.port}`);
+  // Fire-and-forget update check: never blocks serve, never replaces the
+  // binary, every error silent (see startupUpdateCheck).
+  void startupUpdateCheck(resolveUpdateConfig(cfg));
   return 0;
 }
 
@@ -183,6 +191,64 @@ async function convertCommand(parsed: Extract<CliCommand, { cmd: "convert" }>): 
   }
 }
 
+// Body of `o2a2o update`, factored out of runCli so tests can inject a
+// stubbed manager and stay offline. `enabled` comes from the resolved update
+// config; runCli owns config loading and manager construction.
+// Non-interactive by design: a found release is installed without prompting.
+export async function updateCommand(manager: UpdateManager, enabled: boolean): Promise<number> {
+  if (!enabled) {
+    console.error("update is disabled by config (update.enabled: false)");
+    return 1;
+  }
+  let rel: ReleaseInfo | null;
+  try { rel = await manager.check(); }
+  catch (e) {
+    console.error(`update check failed: ${e instanceof Error ? e.message : String(e)}`);
+    return 1;
+  }
+  if (rel === null) {
+    console.log(`already up to date (${VERSION})`);
+    return 0;
+  }
+  const result = await manager.update(rel);
+  if (result.ok) {
+    console.log(`updated to ${rel.version}`);
+    return 0;
+  }
+  if (result.rolledBack) {
+    console.error("update failed, rolled back");
+    return 1;
+  }
+  // Refused without ever touching the running binary; surface the reason. The
+  // manager's structural refusal is a missing checksums asset; anything else
+  // failed verification before the replace, with details already logged.
+  const reason = rel.sha256Url === undefined
+    ? "release has no checksums asset; refusing unverified install"
+    : "new binary failed verification; current binary kept";
+  console.error(`update refused: ${reason}`);
+  return 1;
+}
+
+// check_on_start notice: one background GitHub Releases query after serve is
+// up; prints a single line when a newer release exists. Never awaits, never
+// auto-replaces, swallows every error so serve is never disturbed. Returns
+// the in-flight promise only so tests can await it; the serve path ignores it.
+export function startupUpdateCheck(
+  uc: UpdateConfig,
+  deps: { manager?: UpdateManager } = {},
+): Promise<void> {
+  if (!uc.check_on_start) return Promise.resolve();
+  const manager = deps.manager ?? new UpdateManager({
+    repo: uc.repo,
+    currentVersion: VERSION,
+    binaryPath: process.execPath,
+    allowPrerelease: uc.allow_prerelease,
+  });
+  return manager.check()
+    .then((rel) => { if (rel) console.log(`update available: ${rel.version} (run \`o2a2o update\`)`); })
+    .catch(() => { /* silent: a failed startup check must never disturb serve */ });
+}
+
 export async function runCli(argv: string[]): Promise<number> {
   const parsed = parseArgv(argv);
   switch (parsed.cmd) {
@@ -196,6 +262,22 @@ export async function runCli(argv: string[]): Promise<number> {
     }
     case "config": return configCommand(parsed);
     case "convert": return convertCommand(parsed);
+    case "update": {
+      let cfg: AppConfig;
+      try { cfg = await loadConfig(DEFAULT_CONFIG_PATH); }
+      catch (e) {
+        console.error(e instanceof Error ? e.message : String(e));
+        return 1;
+      }
+      const uc = resolveUpdateConfig(cfg);
+      const manager = new UpdateManager({
+        repo: uc.repo,
+        currentVersion: VERSION,
+        binaryPath: process.execPath,
+        allowPrerelease: uc.allow_prerelease,
+      });
+      return updateCommand(manager, uc.enabled);
+    }
     case "version":
       console.log(VERSION);
       return 0;
