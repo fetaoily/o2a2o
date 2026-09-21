@@ -23,6 +23,28 @@ test("encoder emits minimal viable event set", () => {
   expect(out).toContain('"type":"response.completed"');
   expect(out).toContain('"total_tokens":5');
 });
+test("text then tool_start(index 0) allocates distinct output indexes", () => {
+  // Chat upstreams number their first tool call 0; the encoder must allocate
+  // its own monotonic output indexes so the function_call item cannot collide
+  // with the message item at output_index 0.
+  const e = new ResponsesStreamEncoder();
+  const out = e.start()
+    + e.push({ type: "text_delta", text: "Let me check" })
+    + e.push({ type: "tool_start", index: 0, id: "c1", name: "f" })
+    + e.push({ type: "tool_delta", index: 0, partialJson: '{"x":1}' })
+    + e.finish("tool_use");
+  const added = [...out.matchAll(/"type":"response\.output_item\.added","output_index":(\d+)/g)].map((m) => Number(m[1]));
+  expect(added).toEqual([0, 1]);
+  expect(out).toContain('"delta":"Let me check"');   // preamble text survives
+  const argsDelta = out.match(/"type":"response\.function_call_arguments\.delta","item_id":"[^"]*","output_index":(\d+)/);
+  expect(argsDelta?.[1]).toBe("1");                  // delta binds to the open tool item's index
+});
+test("constructor metadata surfaces in response.created when provided", () => {
+  const e = new ResponsesStreamEncoder({ id: "resp_fixed", model: "gpt-4o" });
+  const out = e.start();
+  expect(out).toContain('"id":"resp_fixed"');
+  expect(out).toContain('"model":"gpt-4o"');
+});
 test("encoder error path emits responses error event frame", () => {
   const e = new ResponsesStreamEncoder();
   const out = e.start() + e.push({ type: "error", message: "boom" }) + e.finish("stop");

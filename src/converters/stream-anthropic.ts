@@ -102,11 +102,14 @@ type StopReason = Extract<StreamEvent, { type: "end" }>["stopReason"];
 
 // Builds anthropic message SSE frames from StreamEvents. The envelope
 // (id / model / usage) lives inside message_start's message object
-// (section 10), so no constructor metadata is needed: id and model are
-// synthesized here (plumbing of real values is a later task). A text block
-// opens together with message_start at index 0, matching upstream streams;
-// tool blocks open at their event index. finish() closes any open block,
-// emits message_delta (stop_reason reversed via IR_TO_STOP, cumulative
+// (section 10); id and model come from the optional constructor metadata,
+// falling back to the synthesized defaults. A text block opens together
+// with message_start. Block indexes are allocated monotonically by the
+// encoder itself (its own counter): upstream event indexes are ignored for
+// placement, so a chat upstream numbering its first tool call 0 can never
+// collide with the opening text block. tool_delta events bind to the open
+// tool block's allocated index. finish() closes any open block, emits
+// message_delta (stop_reason reversed via IR_TO_STOP, cumulative
 // output_tokens) and terminates with message_stop.
 export class AnthropicStreamEncoder {
   private openBlock: { index: number; kind: "text" | "tool" } | undefined;
@@ -115,8 +118,13 @@ export class AnthropicStreamEncoder {
   private stopReason: StopReason = "stop";
   private endSeen = false;
   private finishSent = false;
-  private readonly id = `msg_${crypto.randomUUID()}`;
-  private readonly model = "unknown";
+  private readonly id: string;
+  private readonly model: string;
+
+  constructor(meta?: { id?: string; model?: string }) {
+    this.id = meta?.id ?? `msg_${crypto.randomUUID()}`;
+    this.model = meta?.model ?? "unknown";
+  }
 
   private frame(body: Record<string, unknown>, event: string): string {
     return encodeSse(JSON.stringify(body), event);
@@ -134,7 +142,7 @@ export class AnthropicStreamEncoder {
   }
 
   // message_start with the full message envelope, then the initial text
-  // content block (index 0).
+  // content block at the first allocated index.
   start(inputTokens?: number): string {
     const messageStart = this.frame({
       type: "message_start",
@@ -169,11 +177,12 @@ export class AnthropicStreamEncoder {
       }
       case "tool_start": {
         let out = this.closeOpenBlock();
-        this.openBlock = { index: ev.index, kind: "tool" };
-        this.nextIndex = Math.max(this.nextIndex, ev.index + 1);
+        // Index is allocated, never taken from ev.index: upstream numbering
+        // (chat tool calls start at 0) would collide with the text block.
+        this.openBlock = { index: this.nextIndex++, kind: "tool" };
         out += this.frame({
           type: "content_block_start",
-          index: ev.index,
+          index: this.openBlock.index,
           content_block: { type: "tool_use", id: ev.id, name: ev.name, input: {} },
         }, "content_block_start");
         return out;
@@ -181,7 +190,7 @@ export class AnthropicStreamEncoder {
       case "tool_delta":
         return this.frame({
           type: "content_block_delta",
-          index: ev.index,
+          index: this.openBlock?.kind === "tool" ? this.openBlock.index : ev.index,
           delta: { type: "input_json_delta", partial_json: ev.partialJson },
         }, "content_block_delta");
       case "end": {

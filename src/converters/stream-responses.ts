@@ -117,16 +117,27 @@ interface OpenItem {
 // output_item.done, response.completed) plus the function_call item with
 // response.function_call_arguments.delta for tools and an error frame.
 // The envelope (id / object / created_at / model) lives inside each event's
-// embedded response object (section 10), so id and model are synthesized
-// here (plumbing of real values is a later task).
+// embedded response object (section 10); id and model come from the optional
+// constructor metadata, falling back to the synthesized defaults. Output
+// indexes are allocated monotonically by the encoder itself (its own
+// counter): upstream event indexes are ignored for placement, so a chat
+// upstream numbering its first tool call 0 can never collide with the
+// message item at output_index 0. function_call_arguments.delta events bind
+// to the open function_call item's allocated index.
 export class ResponsesStreamEncoder {
-  private readonly id = `resp_${crypto.randomUUID()}`;
-  private readonly model = "unknown";
+  private readonly id: string;
+  private readonly model: string;
   private readonly createdAt = Math.floor(Date.now() / 1000);
   private nextItemId = 0;
+  private nextOutputIndex = 0;
   private openItem: OpenItem | undefined;
   private readonly output: Record<string, unknown>[] = [];
   private finishSent = false;
+
+  constructor(meta?: { id?: string; model?: string }) {
+    this.id = meta?.id ?? `resp_${crypto.randomUUID()}`;
+    this.model = meta?.model ?? "unknown";
+  }
 
   private frame(body: Record<string, unknown>): string {
     return encodeSse(JSON.stringify(body));
@@ -166,7 +177,7 @@ export class ResponsesStreamEncoder {
         let out = "";
         if (item === undefined || item.kind !== "message") {
           out += this.closeOpenItem();
-          item = { outputIndex: 0, id: `msg_${++this.nextItemId}`, kind: "message", callId: "", name: "", text: "", args: "" };
+          item = { outputIndex: this.nextOutputIndex++, id: `msg_${++this.nextItemId}`, kind: "message", callId: "", name: "", text: "", args: "" };
           this.openItem = item;
           out += this.frame({ type: "response.output_item.added", output_index: item.outputIndex, item: this.itemEnvelope(item, "in_progress") });
         }
@@ -176,7 +187,9 @@ export class ResponsesStreamEncoder {
       }
       case "tool_start": {
         let out = this.closeOpenItem();
-        const item: OpenItem = { outputIndex: ev.index, id: `fc_${++this.nextItemId}`, kind: "function_call", callId: ev.id, name: ev.name, text: "", args: "" };
+        // Index is allocated, never taken from ev.index: upstream numbering
+        // (chat tool calls start at 0) would collide with the message item.
+        const item: OpenItem = { outputIndex: this.nextOutputIndex++, id: `fc_${++this.nextItemId}`, kind: "function_call", callId: ev.id, name: ev.name, text: "", args: "" };
         this.openItem = item;
         out += this.frame({ type: "response.output_item.added", output_index: item.outputIndex, item: this.itemEnvelope(item, "in_progress") });
         return out;
@@ -187,7 +200,7 @@ export class ResponsesStreamEncoder {
         return this.frame({
           type: "response.function_call_arguments.delta",
           item_id: item !== undefined && item.kind === "function_call" ? item.id : "",
-          output_index: ev.index,
+          output_index: item !== undefined && item.kind === "function_call" ? item.outputIndex : ev.index,
           delta: ev.partialJson,
         });
       }

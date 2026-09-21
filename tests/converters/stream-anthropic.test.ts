@@ -38,6 +38,29 @@ test("encoder error path emits anthropic error event frame", () => {
   expect(out).toContain('event: error');
   expect(out).toContain('"type":"api_error"');
 });
+test("text preamble then chat tool_start(index 0) allocates distinct block indexes", () => {
+  // Chat upstreams number their first tool call 0; the encoder must allocate
+  // its own monotonic block indexes so the tool block cannot collide with the
+  // opening text block at index 0.
+  const e = new AnthropicStreamEncoder();
+  const out = e.start()
+    + e.push({ type: "text_delta", text: "Let me check" })
+    + e.push({ type: "tool_start", index: 0, id: "t1", name: "f" })
+    + e.push({ type: "tool_delta", index: 0, partialJson: '{"x":1}' })
+    + e.finish();
+  const starts = [...out.matchAll(/"type":"content_block_start","index":(\d+)/g)].map((m) => Number(m[1]));
+  expect(starts).toEqual([0, 1]);
+  expect(out).toContain('"type":"text_delta","text":"Let me check"');   // preamble text survives
+  expect(out).toContain("input_json_delta");                            // tool args survive
+  const delta = out.match(/"type":"content_block_delta","index":(\d+),"delta":\{"type":"input_json_delta"/);
+  expect(delta?.[1]).toBe("1");                                         // delta binds to the open tool block's index
+});
+test("constructor metadata surfaces in message_start when provided", () => {
+  const e = new AnthropicStreamEncoder({ id: "msg_fixed", model: "claude-sonnet-4-5" });
+  const out = e.start();
+  expect(out).toContain('"id":"msg_fixed"');
+  expect(out).toContain('"model":"claude-sonnet-4-5"');
+});
 test("tool path emits content_block_stop before message_delta and message_stop last", () => {
   const e = new AnthropicStreamEncoder();
   const out = e.start() + e.push({ type: "tool_start", index: 1, id: "t1", name: "f" })
