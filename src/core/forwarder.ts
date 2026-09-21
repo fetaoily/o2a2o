@@ -102,6 +102,7 @@ export async function forwardWithFailover(opts: {
   for (let attempt = 0; attempt < attempts; attempt++) {
     pool.maybeRecover();
     const decision = pool.select();
+    if (decision.fallback) warn(`all keys cooling down: force-trying ${decision.keyId}`);
     const start = Date.now();
     try {
       const response = await forwardToUpstream({

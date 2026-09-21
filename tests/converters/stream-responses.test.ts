@@ -66,3 +66,13 @@ test("finish length emits response.incomplete with max_output_tokens reason", ()
   expect(out).toContain('"reason":"max_output_tokens"');
   expect(out).toContain('"total_tokens":5');
 });
+test("finish content_filter emits response.incomplete with content_filter reason", () => {
+  // The parser maps response.incomplete/content_filter -> stopReason
+  // "content_filter"; the re-encode must not lose it as response.completed.
+  const e = new ResponsesStreamEncoder();
+  const out = e.start() + e.push({ type: "text_delta", text: "Hi" })
+    + e.finish("content_filter", { inputTokens: 3, outputTokens: 2 });
+  expect(out).toContain('"type":"response.incomplete"');
+  expect(out).toContain('"reason":"content_filter"');
+  expect(out).toContain('"total_tokens":5');
+});

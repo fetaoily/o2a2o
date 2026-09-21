@@ -118,7 +118,10 @@ successes promote it back to `healthy`. If every key is cooling down, the key
 with the lowest `priority` value (the primary) is force-tried so the request
 still goes out. **Request-level**
 failures (400/422) are the request's fault, not the key's: they are returned to the
-client unchanged and never demote a key.
+client unchanged and never demote a key. Note: a single failure costs more than
+the priority bonus of a narrow priority gap — with adjacent priorities (the
+documented default) failover switches keys; a priority gap larger than 10 may
+keep a failed primary winning on score until cooldown.
 
 Streaming requests fail over the same way during establishment: as long as the
 client has received zero bytes, a failing attempt (connection error, non-2xx
