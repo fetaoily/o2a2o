@@ -646,3 +646,9 @@ test("convert parses args", () => {
 - **占位符扫描**：Task 6 测试辅助函数（fakeMonitor/streamOf/readAll）给出意图与规模而非逐行——8 行以内的测试脚手架，属实现细节；Task 7 anthropicUp/openaiUp mock 的 stream 分支描述了行为契约（fixture 帧序列在测试代码中写明）。无 TBD。
 - **类型一致性**：StreamEvent 在 Task 3 定义、Task 4/5 复用（解析器/编码器统一事件词汇）✓；TimeoutConfig 在 Task 1 定义、Task 2/6 消费 ✓；`arm(onTimeout)` 统一回调签名在 Task 6 测试与实现间一致（设计裁定：manager 内部判 stage，避免三个回调）✓；M1 的 `resolveKey(cfg, model, ...)` 签名在 Task 7 复用不变 ✓。
 - **裁定记录**：真实短定时器代替假时钟（Global Constraints）；responses 编码器最小事件集；anthropic message_start input_tokens 占位 0；arm(onTimeout) 单回调；URL 图像 anthropic 出向 = warn+skip+dropped（Task 8）。
+
+## Final Review Corrections (recorded post-execution)
+
+- The plan's S6 snippet (Task 7) asserted `'"stop_reason":"stop"'`, but `stop` is the IR-normalized value; the anthropic wire value is `"end_turn"`. Adapted during execution: the executed test asserts the wire value (`tests/integration/gateway.test.ts`).
+- The idle-detection quantization deviation was accepted during execution: the idle check samples once per `idle_check_interval`, so the effective idle threshold is `idle + idle_grace_period + idle_check_interval` (Windows timer quantization made the naive per-tick comparison flaky). Recorded in TECH-DESIGN §19; default configuration aborts an idle stream after roughly 70-80s.
+- The Task 2 snippet's test import path `../../src/timeout-calculator` was corrected to the real module path `../../src/core/timeout-calculator`, and the timeout-calculator adaptive tests were corrected during execution (arranged to prove the 3x-latency floor raises above the default and is capped by `by_request.max`).

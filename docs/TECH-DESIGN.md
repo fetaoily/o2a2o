@@ -512,3 +512,11 @@ bun run release --version 1.0.0 # tag + GitHub Release + assets + checksums
 - 请求头（`Authorization: Bearer`、`x-request-id`、REST API 版本 `2020-10-01`）：https://platform.openai.com/docs/api-reference/overview
 
 **注意**：`data: [DONE]` 终止哨兵未见于上述规范页面（OpenAPI 规范不覆盖 SSE 传输层），属 OpenAI SDK 生态的通行约定；实现时以 openai 官方 SDK 的实际解析行为为准。
+
+## 19. M2 实现勘误（2026-09-21）
+
+以实现与测试为准，对正文三处修正：
+
+- **§8.1 公式优先级勘误**：实际实现为 `by_model > max_tokens 估算 > default`（by_model 是运维显式覆盖，压过通用估算；正文公式语序读作估算覆盖 by_model，以实现与测试为准）。
+- **§8.2 空闲检测量化补偿**：空闲判定阈值为 `idle + grace + idle_check_interval`（采样间隔盲区补偿；Windows 定时器量化下朴素判定不稳定，实证 6/25 抖动）；默认配置下空闲中止约 70-80s。
+- **§16** `parallel_tool_calls: true` 的丢弃记录与 `x-o2a2o-dropped` 头在流式路径同样生效；`responsesResponseToIr` 上游 `arguments` 解析失败已降级为 `input:{}` + warn（v1.1 行为）。
