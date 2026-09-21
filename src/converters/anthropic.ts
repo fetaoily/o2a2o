@@ -152,7 +152,8 @@ export function irToAnthropic(ir: IRRequest): Record<string, unknown> {
 }
 
 // anthropic stop_reason -> IR stopReason. pause_turn is folded into stop.
-const STOP_TO_IR: Record<string, IRResponse["stopReason"]> = {
+// Shared with the stream codec (stream-anthropic.ts).
+export const STOP_TO_IR: Record<string, IRResponse["stopReason"]> = {
   end_turn: "stop", stop_sequence: "stop", max_tokens: "length",
   tool_use: "tool_use", refusal: "content_filter", pause_turn: "stop",
 };
@@ -183,7 +184,8 @@ export function anthropicResponseToIr(res: unknown): IRResponse {
 }
 
 // IR stopReason -> anthropic stop_reason.
-const IR_TO_STOP: Record<IRResponse["stopReason"], string> = {
+// Shared with the stream codec (stream-anthropic.ts).
+export const IR_TO_STOP: Record<IRResponse["stopReason"], string> = {
   stop: "end_turn", length: "max_tokens", tool_use: "tool_use", content_filter: "refusal",
 };
 
