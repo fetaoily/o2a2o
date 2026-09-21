@@ -19,3 +19,11 @@ test("upstream 401 classifies as authentication error toward anthropic client", 
   const r = toClientError(502, { upstream: 401, body: { error: { message: "bad key", type: "invalid_api_key" } } }, "anthropic");
   expect((r.body as { error?: { type?: string } }).error?.type).toBe("authentication_error");
 });
+test("upstream 403 classifies as authentication toward anthropic client", () => {
+  const r = toClientError(502, { upstream: 403, body: { error: { message: "forbidden", type: "insufficient_quota" } } }, "anthropic");
+  expect((r.body as any).error.type).toBe("authentication_error");
+});
+test("upstream 403 classifies as authentication toward openai client", () => {
+  const r = toClientError(502, { upstream: 403, body: { type: "error", error: { type: "permission_error", message: "forbidden" } } }, "openai_chat");
+  expect((r.body as { error?: { type?: string } }).error?.type).toBe("authentication_error");
+});

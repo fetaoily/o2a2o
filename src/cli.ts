@@ -3,7 +3,7 @@
 import { loadConfig, type AppConfig } from "./config/loader";
 import { validateConfig, CONFIG_TEMPLATE } from "./config/validator";
 import { startGateway } from "./server";
-import { maskKey } from "./utils/logger";
+import { maskKey, setLogLevel } from "./utils/logger";
 
 const VERSION = "0.1.0";
 const DEFAULT_CONFIG_PATH = "./o2a2o.yaml";
@@ -13,6 +13,11 @@ export type CliCommand =
   | { cmd: "config"; sub: "init" | "validate" | "routes"; configPath?: string }
   | { cmd: "version" }
   | { cmd: "help" };
+
+export function parsePort(v: string): number | undefined {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
 
 export function parseArgv(argv: string[]): CliCommand {
   const first = argv[0] ?? "";
@@ -32,8 +37,8 @@ export function parseArgv(argv: string[]): CliCommand {
         const v = argv[++i];
         if (v !== undefined) configPath = v;
       } else if (argv[i] === "--port") {
-        const n = Number(argv[++i]);
-        if (Number.isFinite(n)) port = n;
+        const v = argv[++i];
+        if (v !== undefined) port = parsePort(v);
       }
     }
     return { cmd: "serve", configPath, port };
@@ -65,6 +70,7 @@ async function serveCommand(configPath: string, port?: number): Promise<number> 
     for (const err of errors) console.error(err);
     return 1;
   }
+  setLogLevel(cfg.server.log_level);
   if (port !== undefined) cfg.server.port = port;
   startGateway(cfg);
   console.log(`http://${cfg.server.host}:${cfg.server.port}`);
@@ -106,7 +112,14 @@ async function configCommand(parsed: Extract<CliCommand, { cmd: "config" }>): Pr
 export async function runCli(argv: string[]): Promise<number> {
   const parsed = parseArgv(argv);
   switch (parsed.cmd) {
-    case "serve": return serveCommand(parsed.configPath, parsed.port);
+    case "serve": {
+      for (let i = 1; i < argv.length; i++) {
+        const v = argv[i] === "--port" ? argv[i + 1] : undefined;
+        if (v !== undefined && parsePort(v) === undefined)
+          console.error(`ignoring invalid --port value: ${v}`);
+      }
+      return serveCommand(parsed.configPath, parsed.port);
+    }
     case "config": return configCommand(parsed);
     case "version":
       console.log(VERSION);

@@ -26,5 +26,6 @@ export function warn(msg: string): void { if (enabled("warn")) emit("warn", msg)
 export function error(msg: string): void { if (enabled("error")) emit("error", msg); }
 
 export function maskKey(key: string): string {
+  if (key.length <= 12) return "***" + key.slice(-4);
   return key.slice(0, 8) + "..." + key.slice(-4);
 }

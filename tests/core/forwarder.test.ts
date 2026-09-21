@@ -35,6 +35,10 @@ test("o2a2o_keys stripped from returned body", () => {
 test("no key anywhere throws", () => {
   expect(() => resolveKey({ ...cfg, api_keys: {} }, { name: "nope", provider: "anthropic", api_keys: [] }, {}, {})).toThrow(/no api key/i);
 });
+test("empty-string header key falls through to config key", () => {
+  const { key } = resolveKey(cfg, { name: "gpt-4o", provider: "openai", api_keys: [{ key: "sk-real", priority: 1 }] }, { "x-o2a2o-openai-key": "" }, {});
+  expect(key).toBe("sk-real");
+});
 
 beforeEach(() => { mock.restore(); });
 // global.fetch is assigned directly below; mock.restore() does not undo direct

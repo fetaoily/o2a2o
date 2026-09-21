@@ -7,9 +7,11 @@
 // output format (FR-2: client format by default, x-o2a2o-output-format
 // override supported).
 import type { AppConfig } from "../config/loader";
+import { resolveTimeoutConfig } from "../config/loader";
 import type { Provider } from "./forwarder";
 import type { InputFormat } from "./format-detector";
 import { resolveKey, forwardToUpstream } from "./forwarder";
+import { calculateTimeout, latencyTracker } from "./timeout-calculator";
 import { detectFormat } from "./format-detector";
 import { warn } from "../utils/logger";
 import type { IRResponse } from "../types/ir";
@@ -82,7 +84,18 @@ export async function handleGatewayRequest(
   // note: cross-provider to openai always targets /v1/chat/completions in M1
   // (responses-target conversion from anthropic source is format-level, not provider-level)
 
-  const upstreamRes = await forwardToUpstream({ provider: targetProvider, endpoint, body: upstreamBody, key });
+  // Dynamic non-stream timeout (spec §8.1): estimate from the client body's
+  // token limit, then feed the observed upstream latency back into the tracker.
+  const rawMaxTokens = body.max_tokens ?? body.max_completion_tokens ?? body.max_output_tokens;
+  const timeoutMs = calculateTimeout({
+    model: model.name,
+    maxTokens: typeof rawMaxTokens === "number" ? rawMaxTokens : 0,
+    isStream: body.stream === true,
+    tc: resolveTimeoutConfig(cfg),
+  });
+  const start = Date.now();
+  const upstreamRes = await forwardToUpstream({ provider: targetProvider, endpoint, body: upstreamBody, key, timeoutMs });
+  latencyTracker.record(model.name, Date.now() - start);
   const upstreamJson = await upstreamRes.json() as Record<string, unknown>;
 
   // The shape the upstream natively returned, given the endpoint chosen above.

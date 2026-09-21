@@ -11,7 +11,7 @@ export interface ClientError { status: number; body: Record<string, unknown> }
 // OpenAI upstream type -> anthropic error type.
 function toAnthropicType(upstream: number, type: string | undefined): string {
   if (upstream === 429 || type?.includes("rate")) return "rate_limit_error";
-  if (upstream === 401 || type?.includes("authentication")) return "authentication_error";
+  if (upstream === 401 || upstream === 403 || type?.includes("authentication")) return "authentication_error";
   if (upstream >= 500) return "api_error";
   return "invalid_request_error";
 }
@@ -19,7 +19,7 @@ function toAnthropicType(upstream: number, type: string | undefined): string {
 // Anthropic upstream type -> openai error type (reverse table).
 function toOpenAIType(upstream: number, type: string | undefined): string {
   if (upstream === 429 || type?.includes("rate")) return "rate_limit_error";
-  if (upstream === 401 || type?.includes("authentication")) return "authentication_error";
+  if (upstream === 401 || upstream === 403 || type?.includes("authentication")) return "authentication_error";
   if (type === "overloaded_error" || upstream >= 500) return "api_error";
   return "invalid_request_error";
 }

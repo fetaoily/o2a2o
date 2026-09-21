@@ -1,8 +1,9 @@
 // Key resolution and upstream forwarding (single-key M1 version).
 // Key priority: header > body.o2a2o_keys > lowest-priority key of the resolved
-// model > provider-wide global key. Keys are scoped to the model entry (spec
-// §6.1); M3 replaces this lookup with ApiKeyPool. Upstream timeout is fixed in
-// M1; dynamic calculation arrives in M2.
+// model > provider-wide global key (empty-string candidates count as absent).
+// Keys are scoped to the model entry (spec §6.1); M3 replaces this lookup with
+// ApiKeyPool. Upstream timeout defaults to UPSTREAM_TIMEOUT_MS; callers may
+// pass a calculated timeoutMs instead.
 import type { AppConfig, ModelConfig } from "../config/loader";
 import { log, warn, error, maskKey } from "../utils/logger";
 
@@ -33,7 +34,7 @@ export function resolveKey(
   const { o2a2o_keys, ...rest } = body; // strip ALWAYS, even when key came from elsewhere
   const bodyKey = (o2a2o_keys as Partial<Record<Provider, string>> | undefined)?.[model.provider];
   const modelKeys = [...model.api_keys].sort((a, b) => a.priority - b.priority);
-  const key = hdrKey ?? bodyKey ?? modelKeys[0]?.key ?? cfg.api_keys[model.provider];
+  const key = hdrKey || bodyKey || modelKeys[0]?.key || cfg.api_keys[model.provider];
   if (!key) throw new Error(`no api key available for model ${model.name} (provider ${model.provider})`);
   return { key, body: rest };
 }
@@ -43,9 +44,10 @@ export async function forwardToUpstream(opts: {
   endpoint: "/v1/chat/completions" | "/v1/responses" | "/v1/messages";
   body: Record<string, unknown>;
   key: string;
+  timeoutMs?: number;
 }): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? UPSTREAM_TIMEOUT_MS);
   try {
     const headers: Record<string, string> = opts.provider === "anthropic"
       ? { "x-api-key": opts.key, "anthropic-version": "2023-06-01", "content-type": "application/json" }
