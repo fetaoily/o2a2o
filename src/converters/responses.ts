@@ -148,7 +148,7 @@ export function irToResponses(ir: IRRequest): Record<string, unknown> {
       ? ir.toolChoice
       : { type: "function", name: ir.toolChoice.name };
   if (ir.structuredOutput !== undefined)
-    out.text = { format: { type: "json_schema", schema: ir.structuredOutput } };
+    out.text = { format: { type: "json_schema", json_schema: { schema: ir.structuredOutput } } };
   if (ir.effort !== undefined) out.reasoning = { effort: ir.effort };
   return out;
 }
@@ -172,7 +172,10 @@ export function responsesResponseToIr(res: unknown): IRResponse {
   if (r.status === "incomplete" && r.incomplete_details?.reason === "max_output_tokens") stopReason = "length";
   else if (r.status === "failed") {
     stopReason = "content_filter";
-    if (r.error?.message) console.warn(`[openai_responses] response failed: ${r.error.message}`);
+    if (r.error?.message) {
+      console.warn(`[openai_responses] response failed: ${r.error.message}`);
+      parts.push({ type: "text", text: r.error.message });
+    }
   } else if (parts.some((p) => p.type === "tool_use")) stopReason = "tool_use";
   return {
     id: r.id ?? "",

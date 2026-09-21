@@ -58,3 +58,19 @@ test("response mapping: output_text, function_call, incomplete reason", () => {
   expect(back.output[0].content[0].type).toBe("output_text");
   expect(back.usage).toEqual({ input_tokens: 7, output_tokens: 4, total_tokens: 11 });
 });
+
+test("structuredOutput round-trips through irToResponses -> responsesToIr", () => {
+  const ir = { model: "m", messages: [{ role: "user", content: "x" }], maxTokens: 10, stream: false,
+    structuredOutput: { type: "object" } };
+  const roundTripped = responsesToIr(irToResponses(ir as any));
+  expect(roundTripped.ir.structuredOutput).toEqual({ type: "object" });
+});
+
+test("failed response merges error message into content", () => {
+  const res = { id: "resp_9", model: "gpt-4o", status: "failed",
+    error: { code: "server_error", message: "The model failed to generate a response." },
+    output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } };
+  const ir = responsesResponseToIr(res);
+  expect(ir.stopReason).toBe("content_filter");
+  expect(ir.content).toContainEqual({ type: "text", text: "The model failed to generate a response." });
+});
