@@ -45,6 +45,7 @@ export async function forwardToUpstream(opts: {
   body: Record<string, unknown>;
   key: string;
   timeoutMs?: number;
+  accept?: string;
 }): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? UPSTREAM_TIMEOUT_MS);
@@ -52,6 +53,7 @@ export async function forwardToUpstream(opts: {
     const headers: Record<string, string> = opts.provider === "anthropic"
       ? { "x-api-key": opts.key, "anthropic-version": "2023-06-01", "content-type": "application/json" }
       : { "authorization": `Bearer ${opts.key}`, "content-type": "application/json" };
+    if (opts.accept) headers.accept = opts.accept;
     log(`${opts.provider} POST ${opts.endpoint} key=${maskKey(opts.key)}`);
     const res = await fetch(upstreamBase(opts.provider) + opts.endpoint, {
       method: "POST", headers, body: JSON.stringify(opts.body), signal: controller.signal,

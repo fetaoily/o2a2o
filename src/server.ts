@@ -4,7 +4,7 @@
 import type { AppConfig } from "./config/loader";
 import type { InputFormat } from "./core/format-detector";
 import { detectFormat } from "./core/format-detector";
-import { handleGatewayRequest } from "./core/unified-converter";
+import { handleGatewayRequest, handleGatewayStream, wantsStreaming } from "./core/unified-converter";
 import { checkAuth, modelsBody } from "./core/models-endpoint";
 import { ParamError } from "./converters/chat";
 import { UpstreamError } from "./core/forwarder";
@@ -46,7 +46,22 @@ export function startGateway(cfg: AppConfig): ReturnType<typeof Bun.serve> {
       if (req.method === "POST" && GATEWAY_PATHS.includes(url.pathname)) {
         const body = await req.json().catch(() => ({})) as Record<string, unknown>;
         try {
-          const out = await handleGatewayRequest(cfg, url.pathname, body, headers);
+          // Stream-truthy requests take the M2 streaming path (1:1: a
+          // streaming client always gets a streaming upstream call); the
+          // error catch below also covers it — upstream non-2xx throws
+          // before the stream is established.
+          const out = wantsStreaming(body)
+            ? await handleGatewayStream(cfg, url.pathname, body, headers)
+            : await handleGatewayRequest(cfg, url.pathname, body, headers);
+          if ("stream" in out) {
+            const h: Record<string, string> = {
+              "content-type": out.contentType,
+              "cache-control": "no-cache",
+              connection: "keep-alive",
+            };
+            if (out.droppedParams) h["x-o2a2o-dropped"] = out.droppedParams.join(",");
+            return new Response(out.stream, { status: out.status, headers: h });
+          }
           const h: Record<string, string> = { "content-type": "application/json" };
           if (out.droppedParams) h["x-o2a2o-dropped"] = out.droppedParams.join(",");
           return new Response(JSON.stringify(out.body), { status: out.status, headers: h });

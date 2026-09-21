@@ -2,7 +2,6 @@
 import type { IRContentPart, IRMessage, IRRequest, IRResponse } from "../types/ir";
 import type { AntBlock, AntResponse } from "../types/anthropic";
 import type { ConvResult } from "./chat";
-import { ParamError } from "./chat";
 
 // anthropic content block -> IRContentPart. thinking blocks are dropped with a
 // debug log; unknown types are skipped. Blocks carrying cache_control have it
@@ -42,8 +41,6 @@ function toIrToolChoice(tc: any): IRRequest["toolChoice"] {
 
 export function anthropicToIr(body: unknown): ConvResult {
   const b = body as any;
-  if (b.stream === true)
-    throw new ParamError("streaming is not supported in this gateway version (planned for M2)");
   const dropped: string[] = [];
   if (b.metadata !== undefined) dropped.push("metadata");
   let system: string | undefined;

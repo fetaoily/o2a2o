@@ -60,8 +60,6 @@ function normalizeToolChoice(tc: unknown): IRRequest["toolChoice"] {
 
 export function chatToIr(body: unknown): ConvResult {
   const b = body as any;
-  if (b.stream === true)
-    throw new ParamError("streaming is not supported in this gateway version (planned for M2)");
   if (b.n !== undefined && b.n > 1)
     throw new ParamError("`n` must be 1: target provider does not support multiple choices");
   const rf = b.response_format;

@@ -28,8 +28,6 @@ function itemToContent(content: unknown): string | IRContentPart[] {
 
 export function responsesToIr(body: unknown): ConvResult {
   const b = body as ResponsesRequest;
-  if ((b as any).stream === true)
-    throw new ParamError("streaming is not supported in this gateway version (planned for M2)");
   if ((b.text as any)?.format?.type === "json_object")
     throw new ParamError('text.format json_object is not supported; use {"type":"json_schema"}');
   const dropped: string[] = [...DROPPED.filter((p) => (b as any)[p] !== undefined)];

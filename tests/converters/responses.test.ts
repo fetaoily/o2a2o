@@ -77,9 +77,8 @@ test("failed response merges error message into content", () => {
   expect(ir.content).toContainEqual({ type: "text", text: "The model failed to generate a response." });
 });
 
-test("stream:true throws ParamError mentioning streaming", () => {
-  expect(() => responsesToIr({ model: "m", input: "x", stream: true })).toThrow(ParamError);
-  expect(() => responsesToIr({ model: "m", input: "x", stream: true })).toThrow(/streaming/);
+test("stream:true maps into ir.stream (streaming no longer rejected)", () => {
+  expect(responsesToIr({ model: "m", input: "x", stream: true }).ir.stream).toBe(true);
 });
 
 test("malformed function_call arguments throw ParamError naming the tool", () => {

@@ -47,9 +47,9 @@ test("null stop stays undefined", () => {
   expect(ir.stop).toBeUndefined();
 });
 
-test("stream:true throws ParamError mentioning streaming", () => {
-  expect(() => chatToIr({ model: "m", messages: [{ role: "user", content: "x" }], stream: true })).toThrow(ParamError);
-  expect(() => chatToIr({ model: "m", messages: [{ role: "user", content: "x" }], stream: true })).toThrow(/streaming/);
+test("stream:true maps into ir.stream (streaming no longer rejected)", () => {
+  expect(chatToIr({ model: "m", messages: [{ role: "user", content: "x" }], stream: true }).ir.stream).toBe(true);
+  expect(chatToIr({ model: "m", messages: [{ role: "user", content: "x" }] }).ir.stream).toBe(false);
 });
 
 test("malformed tool call arguments throw ParamError naming the tool", () => {
