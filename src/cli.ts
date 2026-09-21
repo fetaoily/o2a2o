@@ -11,7 +11,7 @@ import { chatToIr, irToChat, type ConvResult } from "./converters/chat";
 import { responsesToIr, irToResponses } from "./converters/responses";
 import { anthropicToIr, irToAnthropic } from "./converters/anthropic";
 
-const VERSION = "0.1.0";
+const VERSION = "0.3.0";
 const DEFAULT_CONFIG_PATH = "./o2a2o.yaml";
 
 export type CliCommand =

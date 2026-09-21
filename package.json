@@ -1,11 +1,13 @@
 {
   "name": "o2a2o",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "test": "bun test",
-    "build": "bun build --compile src/index.ts --outfile dist/o2a2o"
+    "build": "bun build --compile src/index.ts --outfile dist/o2a2o",
+    "build:all": "bun scripts/build-all.mjs",
+    "checksums": "bun scripts/build-all.mjs --checksums"
   },
   "dependencies": { "yaml": "^2.5.0" },
   "devDependencies": { "@types/bun": "latest" }
