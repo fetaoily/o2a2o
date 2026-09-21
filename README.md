@@ -114,8 +114,9 @@ count and time since last use, and the best-scoring key serves the request. Afte
 `failure_threshold` consecutive **key-level** failures (network errors, upstream
 timeouts, 5xx, 429, 401/403) a key enters cooldown for `cooldown_ms`; an expired
 cooldown returns the key as `degraded`, and `recovery_successes` consecutive
-successes promote it back to `healthy`. If every key is cooling down, the
-lowest-priority key is force-tried so the request still goes out. **Request-level**
+successes promote it back to `healthy`. If every key is cooling down, the key
+with the lowest `priority` value (the primary) is force-tried so the request
+still goes out. **Request-level**
 failures (400/422) are the request's fault, not the key's: they are returned to the
 client unchanged and never demote a key.
 
