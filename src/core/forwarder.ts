@@ -1,10 +1,16 @@
-// Key resolution and upstream forwarding (single-key M1 version).
-// Key priority: header > body.o2a2o_keys > lowest-priority key of the resolved
-// model > provider-wide global key (empty-string candidates count as absent).
-// Keys are scoped to the model entry (spec §6.1); M3 replaces this lookup with
-// ApiKeyPool. Upstream timeout defaults to UPSTREAM_TIMEOUT_MS; callers may
-// pass a calculated timeoutMs instead.
-import type { AppConfig, ModelConfig } from "../config/loader";
+// Upstream forwarding with per-model key pools (M3).
+// Dynamic keys (request header / body.o2a2o_keys) bypass the pool entirely:
+// they are used per-request with a single attempt and no pool accounting.
+// Configured keys live in one ApiKeyPool per model (priority order, health
+// scoring, cooldown); forwardWithFailover drives the cross-key retry loop and
+// feeds successes/failures back into the pool. Config keys with an empty
+// string count as absent (M2 truthiness preserved); a keyless model falls back
+// to the provider-wide global key, and with neither it throws.
+// Upstream timeout defaults to UPSTREAM_TIMEOUT_MS; callers may pass a
+// calculated timeoutMs instead.
+import type { AppConfig, ApiKeyConfig, FailoverConfig, ModelConfig } from "../config/loader";
+import { resolveFailoverConfig } from "../config/loader";
+import { ApiKeyPool } from "./api-key-pool";
 import { log, warn, error, maskKey } from "../utils/logger";
 
 export type Provider = "openai" | "anthropic";
@@ -24,19 +30,93 @@ export function upstreamBase(provider: Provider): string {
     : (process.env.O2A2O_UPSTREAM_ANTHROPIC ?? "https://api.anthropic.com");
 }
 
-export function resolveKey(
-  cfg: AppConfig,
-  model: ModelConfig,
-  headers: Record<string, string | undefined>,
-  body: Record<string, unknown>,
-): { key: string; body: Record<string, unknown> } {
-  const hdrKey = headers[model.provider === "openai" ? "x-o2a2o-openai-key" : "x-o2a2o-anthropic-key"];
-  const { o2a2o_keys, ...rest } = body; // strip ALWAYS, even when key came from elsewhere
-  const bodyKey = (o2a2o_keys as Partial<Record<Provider, string>> | undefined)?.[model.provider];
-  const modelKeys = [...model.api_keys].sort((a, b) => a.priority - b.priority);
-  const key = hdrKey || bodyKey || modelKeys[0]?.key || cfg.api_keys[model.provider];
-  if (!key) throw new Error(`no api key available for model ${model.name} (provider ${model.provider})`);
-  return { key, body: rest };
+// Cross-key retry classification (D4): network failures and 5xx/429/401/403
+// switch keys; every other UpstreamError (4xx) and any non-upstream error
+// (ParamError etc.) surfaces to the caller immediately. The stream path (M3
+// Task 4) reuses this for its pre-first-packet retry window.
+export function isRetryableUpstreamError(e: unknown): boolean {
+  if (e instanceof UpstreamError)
+    return e.status >= 500 || e.status === 429 || e.status === 401 || e.status === 403;
+  if (e instanceof TypeError) return true;       // fetch network failure
+  if (e instanceof Error && e.name === "AbortError") return true; // timeout abort
+  return false;
+}
+
+// One pool per model, lazily constructed. `from(cfg)` caches one registry per
+// config object in a module-level WeakMap, so pool state persists across
+// requests for a served config while distinct cfg objects (tests, reloads)
+// stay isolated.
+const REGISTRIES = new WeakMap<AppConfig, KeyPoolRegistry>();
+
+export class KeyPoolRegistry {
+  private pools = new Map<string, ApiKeyPool>();
+  private failover: FailoverConfig;
+
+  constructor(private cfg: AppConfig) {
+    this.failover = resolveFailoverConfig(cfg);
+  }
+
+  static from(cfg: AppConfig): KeyPoolRegistry {
+    let registry = REGISTRIES.get(cfg);
+    if (!registry) {
+      registry = new KeyPoolRegistry(cfg);
+      REGISTRIES.set(cfg, registry);
+    }
+    return registry;
+  }
+
+  poolFor(model: ModelConfig): ApiKeyPool {
+    let pool = this.pools.get(model.name);
+    if (!pool) {
+      const keys: ApiKeyConfig[] = model.api_keys.filter((k) => k.key); // "" counts as absent (M2)
+      if (!keys.length) {
+        const globalKey = this.cfg.api_keys[model.provider];
+        if (globalKey) keys.push({ key: globalKey, priority: 100, weight: 0 });
+      }
+      if (!keys.length) throw new Error(`no api key available for provider ${model.provider}`);
+      pool = new ApiKeyPool(this.failover, keys);
+      this.pools.set(model.name, pool);
+    }
+    return pool;
+  }
+}
+
+// Non-stream forward with cross-key failover: at most maxRetries total
+// attempts, each selecting the pool's best available key. Success records the
+// key's latency and returns; a failure is recorded and retried on the next key
+// only when retryable, otherwise the last error is thrown as-is (UpstreamError
+// keeps the failing attempt's status/body).
+export async function forwardWithFailover(opts: {
+  provider: Provider;
+  endpoint: "/v1/chat/completions" | "/v1/responses" | "/v1/messages";
+  body: Record<string, unknown>;
+  registry: KeyPoolRegistry;
+  model: ModelConfig;
+  timeoutMs: number;
+  maxRetries: number;
+  accept?: string;
+}): Promise<{ response: Response; keyId: string; fallback: boolean }> {
+  const pool = opts.registry.poolFor(opts.model); // throws when no key is configured at all
+  let lastError: unknown;
+  const attempts = Math.max(1, opts.maxRetries); // always at least one attempt
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    pool.maybeRecover();
+    const decision = pool.select();
+    const start = Date.now();
+    try {
+      const response = await forwardToUpstream({
+        provider: opts.provider, endpoint: opts.endpoint, body: opts.body,
+        key: decision.key, timeoutMs: opts.timeoutMs, accept: opts.accept,
+      });
+      pool.recordSuccess(decision.keyId, Date.now() - start);
+      return { response, keyId: decision.keyId, fallback: decision.fallback };
+    } catch (e) {
+      pool.recordFailure(decision.keyId);
+      lastError = e;
+      if (!isRetryableUpstreamError(e)) break;
+    }
+  }
+  throw lastError;
 }
 
 export async function forwardToUpstream(opts: {

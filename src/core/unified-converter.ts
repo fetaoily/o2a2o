@@ -1,18 +1,20 @@
 // Unified gateway pipeline: detect the client format from path+body, resolve
-// the model route (aliases included), resolve the upstream key BEFORE
-// conversion so o2a2o_keys never enters any converter, convert through the IR
-// only when source and target providers differ (same-provider bodies pass
-// through untouched with the alias rewritten to the canonical model name),
-// forward, then render the upstream response in the requested output format
-// (FR-2: client format by default, x-o2a2o-output-format override supported).
+// the model route (aliases included), resolve the dynamic upstream key BEFORE
+// conversion so o2a2o_keys never enters any converter (a dynamic key is used
+// per-request with no pool accounting; otherwise the model's key pool chooses
+// at forward time, M3), convert through the IR only when source and target
+// providers differ (same-provider bodies pass through untouched with the alias
+// rewritten to the canonical model name), forward, then render the upstream
+// response in the requested output format (FR-2: client format by default,
+// x-o2a2o-output-format override supported).
 // The detect/alias/model/key/request-conversion prefix is shared verbatim by
 // the non-stream path (handleGatewayRequest) and the streaming path
 // (handleGatewayStream, M2).
 import type { AppConfig, ModelConfig } from "../config/loader";
-import { resolveTimeoutConfig } from "../config/loader";
+import { resolveTimeoutConfig, resolveFailoverConfig } from "../config/loader";
 import type { Provider } from "./forwarder";
 import type { InputFormat } from "./format-detector";
-import { resolveKey, forwardToUpstream } from "./forwarder";
+import { forwardToUpstream, forwardWithFailover, KeyPoolRegistry } from "./forwarder";
 import { calculateTimeout, latencyTracker } from "./timeout-calculator";
 import { detectFormat } from "./format-detector";
 import { warn } from "../utils/logger";
@@ -74,17 +76,17 @@ interface ResolvedRoute {
   outFormat: InputFormat;          // requested output format (header override aware)
   targetProvider: Provider;
   model: ModelConfig;
-  key: string;
+  dynamicKey: string | undefined;  // header/body key; present => single per-request attempt bypassing the pool
   upstreamBody: Record<string, unknown>;
   dropped: string[] | undefined;
   endpoint: "/v1/chat/completions" | "/v1/responses" | "/v1/messages";
 }
 
 // Shared first half of both gateway paths: detect, output-format override
-// validation, alias + model resolution, key resolution, request conversion.
-// `wantsStream` normalizes the body's stream flag to a real boolean so an SSE
-// upstream always receives stream:true regardless of how the client spelled it
-// or whether the converters carry the field.
+// validation, alias + model resolution, dynamic-key extraction, request
+// conversion. `wantsStream` normalizes the body's stream flag to a real
+// boolean so an SSE upstream always receives stream:true regardless of how the
+// client spelled it or whether the converters carry the field.
 function resolveRoute(
   cfg: AppConfig,
   path: string,
@@ -105,8 +107,14 @@ function resolveRoute(
   const targetProvider = model.provider;
   const sourceProvider = FORMAT_PROVIDER[format];
 
-  // key resolution happens BEFORE conversion so o2a2o_keys never enters any converter
-  const { key, body: cleanBody } = resolveKey(cfg, model, headers, normalized);
+  // Dynamic key extraction happens BEFORE conversion so o2a2o_keys never
+  // enters any converter. The field is stripped ALWAYS, even when the key came
+  // from elsewhere; configured keys are not chosen here anymore — the model's
+  // pool owns that decision at forward time (M3).
+  const hdrKey = headers[model.provider === "openai" ? "x-o2a2o-openai-key" : "x-o2a2o-anthropic-key"];
+  const { o2a2o_keys, ...cleanBody } = normalized; // strip ALWAYS, even when key came from elsewhere
+  const bodyKey = (o2a2o_keys as Partial<Record<Provider, string>> | undefined)?.[model.provider];
+  const dynamicKey = hdrKey || bodyKey || undefined; // empty strings count as absent (M2 truthiness)
 
   let upstreamBody: Record<string, unknown>;
   let dropped: string[] | undefined;
@@ -127,7 +135,7 @@ function resolveRoute(
   // note: cross-provider to openai always targets /v1/chat/completions
   // (responses-target conversion from anthropic source is format-level, not provider-level)
 
-  return { format, outFormat, targetProvider, model, key, upstreamBody, dropped, endpoint };
+  return { format, outFormat, targetProvider, model, dynamicKey, upstreamBody, dropped, endpoint };
 }
 
 // The wire shape the upstream natively produces for the endpoint chosen by
@@ -145,7 +153,7 @@ export async function handleGatewayRequest(
   body: Record<string, unknown>,
   headers: Record<string, string | undefined>,
 ): Promise<GatewayOutcome> {
-  const { format, outFormat, targetProvider, model, key, upstreamBody, dropped, endpoint } =
+  const { format, outFormat, targetProvider, model, dynamicKey, upstreamBody, dropped, endpoint } =
     resolveRoute(cfg, path, body, headers, wantsStreaming(body));
 
   // Dynamic non-stream timeout (spec §8.1): estimate from the client body's
@@ -158,7 +166,16 @@ export async function handleGatewayRequest(
     tc: resolveTimeoutConfig(cfg),
   });
   const start = Date.now();
-  const upstreamRes = await forwardToUpstream({ provider: targetProvider, endpoint, body: upstreamBody, key, timeoutMs });
+  // A dynamic key makes a single per-request attempt with no pool accounting;
+  // otherwise the model's pool picks per attempt and failover runs on retryable
+  // errors (M3). The model-level latency record feeds TimeoutCalculator either way.
+  const upstreamRes = dynamicKey
+    ? await forwardToUpstream({ provider: targetProvider, endpoint, body: upstreamBody, key: dynamicKey, timeoutMs })
+    : (await forwardWithFailover({
+        provider: targetProvider, endpoint, body: upstreamBody,
+        registry: KeyPoolRegistry.from(cfg), model, timeoutMs,
+        maxRetries: resolveFailoverConfig(cfg).max_retries,
+      })).response;
   latencyTracker.record(model.name, Date.now() - start);
   const upstreamJson = await upstreamRes.json() as Record<string, unknown>;
 
@@ -254,13 +271,17 @@ export async function handleGatewayStream(
   body: Record<string, unknown>,
   headers: Record<string, string | undefined>,
 ): Promise<GatewayStreamOutcome | GatewayOutcome> {
-  const { format, outFormat, targetProvider, model, key, upstreamBody, dropped, endpoint } =
+  const { format, outFormat, targetProvider, model, dynamicKey, upstreamBody, dropped, endpoint } =
     resolveRoute(cfg, path, body, headers, wantsStreaming(body));
   if (dropped?.length) warn(`dropped unsupported params: ${dropped.join(",")}`);
 
   // Streams carry no token estimate; by_model overrides and the latency
   // feedback still bound the time to upstream response headers.
   const timeoutMs = calculateTimeout({ model: model.name, maxTokens: 0, isStream: true, tc: resolveTimeoutConfig(cfg) });
+  // Interim single selection (M3 Task 4 replaces this segment with the
+  // pre-first-packet failover loop): a dynamic key is used per-request with no
+  // pool interaction, otherwise the pool's best key serves.
+  const key = dynamicKey ?? KeyPoolRegistry.from(cfg).poolFor(model).select().key;
   const upstreamRes = await forwardToUpstream({
     provider: targetProvider, endpoint, body: upstreamBody, key, timeoutMs, accept: "text/event-stream",
   });
