@@ -18,10 +18,11 @@ const EFFORT: Record<string, IRRequest["effort"]> = {
   none: "low", minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh",
 };
 
-const FINISH_TO_STOP: Record<string, IRResponse["stopReason"]> = {
+// Shared with the stream codec (stream-chat.ts): finish_reason <-> stopReason.
+export const FINISH_TO_STOP: Record<string, IRResponse["stopReason"]> = {
   stop: "stop", length: "length", tool_calls: "tool_use", content_filter: "content_filter",
 };
-const STOP_TO_FINISH: Record<IRResponse["stopReason"], string> = {
+export const STOP_TO_FINISH: Record<IRResponse["stopReason"], string> = {
   stop: "stop", length: "length", tool_use: "tool_calls", content_filter: "content_filter",
 };
 
