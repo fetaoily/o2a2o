@@ -15,3 +15,7 @@ test("upstream openai error -> anthropic client shape", () => {
   const r = toClientError(502, { upstream: 429, body: { error: { message: "rate limited", type: "requests", code: "x" } } }, "anthropic");
   expect(r.body.error).toMatchObject({ type: "rate_limit_error", message: "rate limited" });
 });
+test("upstream 401 classifies as authentication error toward anthropic client", () => {
+  const r = toClientError(502, { upstream: 401, body: { error: { message: "bad key", type: "invalid_api_key" } } }, "anthropic");
+  expect(r.body.error.type).toBe("authentication_error");
+});
