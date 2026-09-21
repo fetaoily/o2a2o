@@ -2,7 +2,7 @@ import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startGateway } from "../../src/server";
 import type { AppConfig } from "../../src/config/loader";
 
-let anthropicUp: Bun.Server; let openaiUp: Bun.Server; let gw: Bun.Server;
+let anthropicUp: ReturnType<typeof Bun.serve>; let openaiUp: ReturnType<typeof Bun.serve>; let gw: ReturnType<typeof Bun.serve>;
 
 beforeAll(() => {
   anthropicUp = Bun.serve({

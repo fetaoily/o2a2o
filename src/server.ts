@@ -26,7 +26,7 @@ function modelsHandler(_cfg: AppConfig, _req: Request): Response {
   });
 }
 
-export function startGateway(cfg: AppConfig): Bun.Server {
+export function startGateway(cfg: AppConfig): ReturnType<typeof Bun.serve> {
   return Bun.serve({
     port: cfg.server.port, hostname: cfg.server.host,
     async fetch(req) {
