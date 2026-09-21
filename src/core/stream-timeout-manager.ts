@@ -107,8 +107,15 @@ export class StreamTimeoutManager {
   // also makes the abort time independent of individual timer jitter: a
   // late tick measures a larger staleness and may fire earlier, but never
   // before the stream has actually been silent for the full threshold.
+  // Before the first packet the first-packet timer owns the window: the idle
+  // stage is skipped entirely, so an idle budget smaller than first_packet
+  // cannot preempt the retryable first-packet abort.
   private checkIdle(): void {
     if (!this.armed || this.fired) return;
+    if (!this.firstPacketSeen) {
+      this.scheduleIdleCheck();
+      return;
+    }
     if (Date.now() - this.lastData > this.cfg.idle + this.cfg.idle_grace_period + this.cfg.idle_check_interval) {
       this.fire("idle");
       return;

@@ -87,6 +87,10 @@ export function convertStream(opts: {
   // event itself. End-event state feeds the encoders' finish() variants.
   let usage: TokenUsage | undefined;
   let stopReason: EndEvent["stopReason"] = "stop";
+  // First end wins: a trailing usage-only chunk (stream_options.include_usage)
+  // emits a second end{stopReason:"stop"} that must not overwrite a recorded
+  // tool_use/length reason. Later ends contribute only usage the first lacked.
+  let endSeen = false;
   const adapter = (() => {
     if (dstFormat === "anthropic") {
       const enc = new AnthropicStreamEncoder(meta);
@@ -115,8 +119,14 @@ export function convertStream(opts: {
     for (const frame of frames) {
       for (const ev of parseFrame(frame)) {
         if (ev.type === "end") {
-          stopReason = ev.stopReason;
-          if (ev.usage) {
+          if (!endSeen) {
+            endSeen = true;
+            stopReason = ev.stopReason;
+            if (ev.usage) {
+              usage = ev.usage;
+              usageSink?.(ev.usage);
+            }
+          } else if (usage === undefined && ev.usage) {
             usage = ev.usage;
             usageSink?.(ev.usage);
           }
@@ -141,10 +151,14 @@ export function convertStream(opts: {
           return;
         }
         if (chunk.done) {
-          const { out } = pumpEvents(sse.push(decoder.decode()));
+          const { out, errored } = pumpEvents(sse.push(decoder.decode()));
           if (out !== "") controller.enqueue(output.encode(out));
-          const finishOut = adapter.finish();
-          if (finishOut !== "") controller.enqueue(output.encode(finishOut));
+          // Mirror the mid-stream error path: once an error frame is out, no
+          // termination frames follow.
+          if (!errored) {
+            const finishOut = adapter.finish();
+            if (finishOut !== "") controller.enqueue(output.encode(finishOut));
+          }
           monitor.disarm();
           controller.close();
           return;

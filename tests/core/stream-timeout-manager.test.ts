@@ -29,3 +29,13 @@ test("stalled stream fires idle error after grace", async () => {
   expect(err?.retryable).toBe(false);
   m.disarm();
 });
+test("idle cannot fire before the first packet even when misconfigured (idle < first_packet)", async () => {
+  // first-packet timer owns the pre-data window: an idle threshold smaller
+  // than first_packet must not preempt it.
+  const m = new StreamTimeoutManager({ first_packet: 300, idle: 10, idle_check_interval: 50, idle_grace_period: 10, total_max: 5000 });
+  let err: StreamTimeoutError | undefined;
+  m.arm((e) => { err = e as StreamTimeoutError; });
+  await new Promise(r => setTimeout(r, 400));   // idle ticks pass, no data yet
+  expect(err?.stage).toBe("first_packet");
+  m.disarm();
+});
