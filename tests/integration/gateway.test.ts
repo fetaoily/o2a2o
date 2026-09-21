@@ -11,7 +11,7 @@ const cfgBase: AppConfig = {
     { name: "gpt-4o", provider: "openai", api_keys: [{ key: "sk-oai", priority: 1 }] },
     { name: "claude-sonnet-4-5", provider: "anthropic", api_keys: [{ key: "sk-ant", priority: 1 }] },
   ],
-  aliases: { sonnet: "claude-sonnet-4-5" }, api_keys: {},
+  aliases: { sonnet: "claude-sonnet-4-5", gpt: "gpt-4o" }, api_keys: {},
 };
 
 beforeAll(() => {
@@ -92,6 +92,56 @@ test("alias resolves (sonnet)", async () => {
   const res = await post("/v1/chat/completions", { model: "sonnet", messages: [{ role: "user", content: "hi" }] });
   expect(res.status).toBe(200);
   expect(anthropicSeen.model).toBe("claude-sonnet-4-5");
+});
+
+test("S1b: alias resolves on same-provider passthrough, canonical model name forwarded", async () => {
+  const res = await post("/v1/chat/completions", { model: "gpt", messages: [{ role: "user", content: "hi" }] });
+  expect(res.status).toBe(200);
+  expect(openaiSeen.model).toBe("gpt-4o");
+});
+
+test("F2a: anthropic-format request to openai model with x-o2a2o-output-format openai_chat returns chat.completion", async () => {
+  const res = await post("/v1/messages", { model: "gpt-4o", max_tokens: 99, messages: [{ role: "user", content: "hi" }] },
+    { "x-api-key": "placeholder", "anthropic-version": "2023-06-01", "x-o2a2o-output-format": "openai_chat" });
+  expect(res.status).toBe(200);
+  const body = await res.json() as any;
+  expect(body.object).toBe("chat.completion");
+  expect(body.choices[0].message.content).toBe("from-gpt");
+});
+
+test("F2b: invalid x-o2a2o-output-format is a 400", async () => {
+  const res = await post("/v1/chat/completions", { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+    { "x-o2a2o-output-format": "xml" });
+  expect(res.status).toBe(400);
+  expect((await res.json() as any).error.message).toMatch(/x-o2a2o-output-format/);
+});
+
+test("F2c: passthrough openai_chat request with output-format openai_responses converts through IR", async () => {
+  const res = await post("/v1/chat/completions", { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+    { "x-o2a2o-output-format": "openai_responses" });
+  expect(res.status).toBe(200);
+  const body = await res.json() as any;
+  expect(body.object).toBe("response");
+  expect(body.output[0].content[0].text).toBe("from-gpt");
+});
+
+test("F3: passthrough request with stream:true is a clean 400", async () => {
+  const res = await post("/v1/chat/completions", { model: "gpt-4o", messages: [{ role: "user", content: "hi" }], stream: true });
+  expect(res.status).toBe(400);
+  expect((await res.json() as any).error.message).toMatch(/streaming/);
+});
+
+test("F3: anthropic-format request with stream:true is a clean 400", async () => {
+  const res = await post("/v1/messages", { model: "gpt-4o", max_tokens: 10, messages: [{ role: "user", content: "hi" }], stream: true },
+    { "x-api-key": "placeholder", "anthropic-version": "2023-06-01" });
+  expect(res.status).toBe(400);
+  expect((await res.json() as any).error.message).toMatch(/streaming/);
+});
+
+test("F3: responses-format request with stream:true is a clean 400", async () => {
+  const res = await post("/v1/responses", { model: "claude-sonnet-4-5", input: "hi", stream: true });
+  expect(res.status).toBe(400);
+  expect((await res.json() as any).error.message).toMatch(/streaming/);
 });
 
 test("S12a: json_schema maps through to output_config.format", async () => {
