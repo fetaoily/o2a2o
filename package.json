@@ -7,6 +7,7 @@
     "test": "bun test",
     "build": "bun build --compile src/index.ts --outfile dist/o2a2o",
     "build:all": "bun scripts/build-all.mjs",
+    "build:platform": "bun scripts/build-all.mjs",
     "checksums": "bun scripts/build-all.mjs --checksums",
     "package:win": "bun scripts/package-windows.mjs",
     "package:linux": "bun scripts/package-linux.mjs",
