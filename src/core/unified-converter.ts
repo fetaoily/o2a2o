@@ -62,7 +62,7 @@ export async function handleGatewayRequest(
   const sourceProvider = FORMAT_PROVIDER[format];
 
   // key resolution happens BEFORE conversion so o2a2o_keys never enters any converter
-  const { key, body: cleanBody } = resolveKey(cfg, targetProvider, headers, body);
+  const { key, body: cleanBody } = resolveKey(cfg, model, headers, body);
 
   let upstreamBody: Record<string, unknown>;
   let dropped: string[] | undefined;

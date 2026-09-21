@@ -1,6 +1,6 @@
 import { test, expect, mock, beforeEach, afterEach } from "bun:test";
 import { resolveKey, forwardToUpstream, UpstreamError } from "../../src/core/forwarder";
-import type { AppConfig } from "../../src/config/loader";
+import type { AppConfig, ModelConfig } from "../../src/config/loader";
 
 const cfg: AppConfig = {
   server: { port: 0, host: "127.0.0.1", log_level: "info" },
@@ -11,18 +11,29 @@ const cfg: AppConfig = {
   aliases: {}, api_keys: { openai: "sk-global" },
 };
 
-test("key priority: header > body > lowest-priority config > global", () => {
-  expect(resolveKey(cfg, "openai", { "x-o2a2o-openai-key": "sk-hdr" }, {}).key).toBe("sk-hdr");
-  expect(resolveKey(cfg, "openai", {}, { o2a2o_keys: { openai: "sk-body" } }).key).toBe("sk-body");
-  expect(resolveKey(cfg, "anthropic", {}, {}).key).toBe("sk-ant-cfg2");   // priority 1 wins
-  expect(resolveKey(cfg, "openai", {}, {}).key).toBe("sk-cfg");
+const oaiModel: ModelConfig = cfg.models[0];
+const antModel: ModelConfig = cfg.models[1];
+
+test("key priority: header > body > lowest-priority model key > provider global", () => {
+  expect(resolveKey(cfg, oaiModel, { "x-o2a2o-openai-key": "sk-hdr" }, {}).key).toBe("sk-hdr");
+  expect(resolveKey(cfg, oaiModel, {}, { o2a2o_keys: { openai: "sk-body" } }).key).toBe("sk-body");
+  expect(resolveKey(cfg, antModel, {}, {}).key).toBe("sk-ant-cfg2");   // priority 1 wins
+  expect(resolveKey(cfg, oaiModel, {}, {}).key).toBe("sk-cfg");
+});
+test("keys are scoped to the resolved model, not pooled across the provider", () => {
+  const second: ModelConfig = { name: "gpt-4o-mini", provider: "openai", api_keys: [{ key: "sk-mini", priority: 1 }] };
+  expect(resolveKey(cfg, second, {}, {}).key).toBe("sk-mini");
+});
+test("model without keys falls back to the provider global", () => {
+  const keyless: ModelConfig = { name: "gpt-x", provider: "openai", api_keys: [] };
+  expect(resolveKey(cfg, keyless, {}, {}).key).toBe("sk-global");
 });
 test("o2a2o_keys stripped from returned body", () => {
-  const { body } = resolveKey(cfg, "openai", {}, { o2a2o_keys: { openai: "k" }, model: "gpt-4o" });
+  const { body } = resolveKey(cfg, oaiModel, {}, { o2a2o_keys: { openai: "k" }, model: "gpt-4o" });
   expect(body).toEqual({ model: "gpt-4o" });
 });
 test("no key anywhere throws", () => {
-  expect(() => resolveKey({ ...cfg, models: [], api_keys: {} }, "anthropic", {}, { model: "nope" } as any)).toThrow(/no api key/i);
+  expect(() => resolveKey({ ...cfg, api_keys: {} }, { name: "nope", provider: "anthropic", api_keys: [] }, {}, {})).toThrow(/no api key/i);
 });
 
 beforeEach(() => { mock.restore(); });

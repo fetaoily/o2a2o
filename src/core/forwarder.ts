@@ -1,10 +1,9 @@
 // Key resolution and upstream forwarding (single-key M1 version).
-// Key priority: header > body.o2a2o_keys > lowest-priority model config key >
-// provider-wide global key. M1 simplification: modelKeys takes the minimum
-// priority across ALL keys of the same provider (no health pool); M3 replaces
-// this lookup with ApiKeyPool. Upstream timeout is fixed in M1; dynamic
-// calculation arrives in M2.
-import type { AppConfig } from "../config/loader";
+// Key priority: header > body.o2a2o_keys > lowest-priority key of the resolved
+// model > provider-wide global key. Keys are scoped to the model entry (spec
+// §6.1); M3 replaces this lookup with ApiKeyPool. Upstream timeout is fixed in
+// M1; dynamic calculation arrives in M2.
+import type { AppConfig, ModelConfig } from "../config/loader";
 import { log, warn, error, maskKey } from "../utils/logger";
 
 export type Provider = "openai" | "anthropic";
@@ -26,17 +25,16 @@ export function upstreamBase(provider: Provider): string {
 
 export function resolveKey(
   cfg: AppConfig,
-  provider: Provider,
+  model: ModelConfig,
   headers: Record<string, string | undefined>,
   body: Record<string, unknown>,
 ): { key: string; body: Record<string, unknown> } {
-  const hdrKey = headers[provider === "openai" ? "x-o2a2o-openai-key" : "x-o2a2o-anthropic-key"];
+  const hdrKey = headers[model.provider === "openai" ? "x-o2a2o-openai-key" : "x-o2a2o-anthropic-key"];
   const { o2a2o_keys, ...rest } = body; // strip ALWAYS, even when key came from elsewhere
-  const bodyKey = (o2a2o_keys as Partial<Record<Provider, string>> | undefined)?.[provider];
-  const modelKeys = cfg.models.filter((m) => m.provider === provider)
-    .flatMap((m) => m.api_keys).sort((a, b) => a.priority - b.priority);
-  const key = hdrKey ?? bodyKey ?? modelKeys[0]?.key ?? cfg.api_keys[provider];
-  if (!key) throw new Error(`no api key available for provider ${provider}`);
+  const bodyKey = (o2a2o_keys as Partial<Record<Provider, string>> | undefined)?.[model.provider];
+  const modelKeys = [...model.api_keys].sort((a, b) => a.priority - b.priority);
+  const key = hdrKey ?? bodyKey ?? modelKeys[0]?.key ?? cfg.api_keys[model.provider];
+  if (!key) throw new Error(`no api key available for model ${model.name} (provider ${model.provider})`);
   return { key, body: rest };
 }
 
