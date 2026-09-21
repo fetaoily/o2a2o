@@ -206,6 +206,26 @@ test("non-retryable 400 does not consume another key", async () => {
   expect(calls).toHaveLength(1); // thrown immediately after one attempt
 });
 
+test("non-retryable 400 does not record key failure", async () => {
+  // Request-level errors are not the key's fault: two requests each 400 on the
+  // same pool must leave every key's failure counters at zero (three such 400s
+  // must not cool a good key).
+  const cfg = regCfg();
+  const registry = new KeyPoolRegistry(cfg);
+  captureFetch(() => errRes(400, { error: "bad request" }));
+  for (let i = 0; i < 2; i++) {
+    await expect(forwardWithFailover({
+      ...FO, body: { model: "gpt-4o" }, registry,
+      model: cfg.models[0], timeoutMs: 1000, maxRetries: 3,
+    })).rejects.toBeInstanceOf(UpstreamError);
+  }
+  const snap = registry.poolFor(cfg.models[0]).snapshot();
+  expect(snap[maskKey(K_PRIMARY)].consecutiveFailures).toBe(0);
+  expect(snap[maskKey(K_PRIMARY)].totalFailures).toBe(0);
+  expect(snap[maskKey(K_SECONDARY)].consecutiveFailures).toBe(0);
+  expect(snap[maskKey(K_SECONDARY)].totalFailures).toBe(0);
+});
+
 test("network failure (fetch TypeError) retries on the next key", async () => {
   const cfg = regCfg();
   const calls = captureFetch((n) => {

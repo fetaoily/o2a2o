@@ -83,9 +83,9 @@ export class KeyPoolRegistry {
 
 // Non-stream forward with cross-key failover: at most maxRetries total
 // attempts, each selecting the pool's best available key. Success records the
-// key's latency and returns; a failure is recorded and retried on the next key
-// only when retryable, otherwise the last error is thrown as-is (UpstreamError
-// keeps the failing attempt's status/body).
+// key's latency and returns; a retryable (key-level) failure is recorded and
+// retried on the next key, a non-retryable (request-level) one is thrown
+// without recording (UpstreamError keeps the failing attempt's status/body).
 export async function forwardWithFailover(opts: {
   provider: Provider;
   endpoint: "/v1/chat/completions" | "/v1/responses" | "/v1/messages";
@@ -111,9 +111,12 @@ export async function forwardWithFailover(opts: {
       pool.recordSuccess(decision.keyId, Date.now() - start);
       return { response, keyId: decision.keyId, fallback: decision.fallback };
     } catch (e) {
-      pool.recordFailure(decision.keyId);
       lastError = e;
+      // Retryable errors are key-level (network/timeout/5xx/429/401/403, D4):
+      // they demote the key. Request-level errors (400/422 etc.) are not the
+      // key's fault — throw without recording so client 400s never cool a key.
       if (!isRetryableUpstreamError(e)) break;
+      pool.recordFailure(decision.keyId);
     }
   }
   throw lastError;
