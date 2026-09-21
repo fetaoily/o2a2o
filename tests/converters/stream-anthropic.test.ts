@@ -32,3 +32,21 @@ test("encoder tool_use path emits content_block_start/stop with input_json_delta
   expect(out).toContain('"type":"tool_use","id":"t1","name":"f"');
   expect(out).toContain("input_json_delta");
 });
+test("encoder error path emits anthropic error event frame", () => {
+  const e = new AnthropicStreamEncoder();
+  const out = e.start() + e.push({ type: "error", message: "Overloaded" }) + e.finish();
+  expect(out).toContain('event: error');
+  expect(out).toContain('"type":"api_error"');
+});
+test("tool path emits content_block_stop before message_delta and message_stop last", () => {
+  const e = new AnthropicStreamEncoder();
+  const out = e.start() + e.push({ type: "tool_start", index: 1, id: "t1", name: "f" })
+    + e.push({ type: "tool_delta", index: 1, partialJson: '{"x":1}' })
+    + e.push({ type: "end", stopReason: "tool_use", usage: { inputTokens: 2, outputTokens: 5 } }) + e.finish();
+  const stopPos = out.indexOf("content_block_stop");
+  const deltaPos = out.indexOf("message_delta");
+  const stopEvPos = out.indexOf("event: message_stop");
+  expect(stopPos).toBeGreaterThan(-1);
+  expect(stopPos).toBeLessThan(deltaPos);
+  expect(stopEvPos).toBe(out.lastIndexOf("event: message_stop"));
+});

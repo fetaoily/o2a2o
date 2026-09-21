@@ -23,3 +23,17 @@ test("encoder emits minimal viable event set", () => {
   expect(out).toContain('"type":"response.completed"');
   expect(out).toContain('"total_tokens":5');
 });
+test("encoder error path emits responses error event frame", () => {
+  const e = new ResponsesStreamEncoder();
+  const out = e.start() + e.push({ type: "error", message: "boom" }) + e.finish("stop");
+  expect(out).toContain('"type":"error"');
+  expect(out).toContain('"code":"server_error"');
+});
+test("finish length emits response.incomplete with max_output_tokens reason", () => {
+  const e = new ResponsesStreamEncoder();
+  const out = e.start() + e.push({ type: "text_delta", text: "Hi" })
+    + e.finish("length", { inputTokens: 3, outputTokens: 2 });
+  expect(out).toContain('"type":"response.incomplete"');
+  expect(out).toContain('"reason":"max_output_tokens"');
+  expect(out).toContain('"total_tokens":5');
+});

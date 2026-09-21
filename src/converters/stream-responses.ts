@@ -201,16 +201,21 @@ export class ResponsesStreamEncoder {
     }
   }
 
-  // Closes the stream: output_item.done for the open item, then
-  // response.completed whose embedded response carries the accumulated
-  // output items and usage (total = input + output).
+  // Closes the stream: output_item.done for the open item, then the
+  // termination event — response.incomplete (embedded response status
+  // "incomplete" + incomplete_details reason max_output_tokens) when the
+  // stop reason is length, response.completed otherwise — whose embedded
+  // response carries the accumulated output items and usage
+  // (total = input + output).
   finish(stopReason: "stop" | "length" | "tool_use" | "content_filter", usage?: TokenUsage): string {
     if (this.finishSent) return "";
     this.finishSent = true;
     let out = this.closeOpenItem();
-    const response = this.responseEnvelope("completed", { output: [...this.output] });
+    const incomplete = stopReason === "length";
+    const response = this.responseEnvelope(incomplete ? "incomplete" : "completed", { output: [...this.output] });
+    if (incomplete) response.incomplete_details = { reason: "max_output_tokens" };
     if (usage !== undefined)
       response.usage = { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens, total_tokens: usage.inputTokens + usage.outputTokens };
-    return out + this.frame({ type: "response.completed", response });
+    return out + this.frame({ type: incomplete ? "response.incomplete" : "response.completed", response });
   }
 }
