@@ -10,8 +10,11 @@ import type { IRRequest } from "./types/ir";
 import { chatToIr, irToChat, type ConvResult } from "./converters/chat";
 import { responsesToIr, irToResponses } from "./converters/responses";
 import { anthropicToIr, irToAnthropic } from "./converters/anthropic";
+import pkg from "../package.json";
 
-const VERSION = "0.3.0";
+// Single source of truth: package.json, inlined at bundle time so compiled
+// binaries bake the right version.
+export const VERSION: string = pkg.version;
 const DEFAULT_CONFIG_PATH = "./o2a2o.yaml";
 
 export type CliCommand =

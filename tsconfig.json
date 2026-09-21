@@ -4,6 +4,7 @@
     "target": "esnext",
     "module": "esnext",
     "moduleResolution": "bundler",
+    "resolveJsonModule": true,
     "types": ["bun-types"],
     "skipLibCheck": true,
     "noEmit": true
