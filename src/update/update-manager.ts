@@ -31,6 +31,8 @@ export interface UpdateManagerOpts {
   fetchFn?: typeof fetch;
   spawnFn?: SpawnFn;
   now?: () => Date;
+  /** Test seam: defaults to node:fs renameSync; lets tests inject mid-rename failures. */
+  renameFn?: (from: string, to: string) => void;
 }
 
 function defaultSpawnFn(cmd: string, args: string[]): SpawnResult {
@@ -80,85 +82,108 @@ export class UpdateManager {
   async update(rel: ReleaseInfo): Promise<UpdateResult> {
     const fetchFn = this.opts.fetchFn ?? fetch;
     const spawnFn = this.opts.spawnFn ?? defaultSpawnFn;
+    const renameFn = this.opts.renameFn ?? renameSync;
     const binaryPath = this.opts.binaryPath;
     const newPath = binaryPath + ".new";
     const backupPath = binaryPath + ".backup";
     const oldPath = binaryPath + ".old";
-    let replaced = false;
+    // True once the original binary is no longer at binaryPath (Windows
+    // rename-aside done, or the POSIX rename applied). From that moment any
+    // failure must end in a rollback attempt.
+    let originalMoved = false;
 
-    // Undo an applied replace atomically: move the failed binary aside, then
-    // rename the original back. After the Windows branch the original sits in
-    // .old; after the POSIX branch only the .backup copy exists.
+    // Undo an applied replace atomically: park the failed binary at .new,
+    // then rename the original back. After the Windows branch the original
+    // sits in .old; after the POSIX branch only the .backup copy exists.
+    // If the replace died between the two Windows renames, binaryPath is
+    // missing and the original is still in .old — restore from whichever
+    // recovery copy exists before anything is deleted.
     const restoreOriginal = (): void => {
+      if (existsSync(binaryPath)) {
+        rmSync(newPath, { force: true });
+        renameFn(binaryPath, newPath);
+      }
+      if (existsSync(oldPath)) renameFn(oldPath, binaryPath);
+      else renameFn(backupPath, binaryPath);
+    };
+
+    // restoreOriginal plus temp cleanup. Temps are removed only after a
+    // successful restore — after a failed one they hold the only remaining
+    // original bytes. Returns whether the original was actually restored.
+    const rollback = (): boolean => {
+      try {
+        restoreOriginal();
+      } catch (e) {
+        error(
+          `rollback failed, keeping recovery copies ${newPath}, ${oldPath}, ${backupPath}: ${errorMessage(e)}`,
+        );
+        return false;
+      }
       rmSync(newPath, { force: true });
-      renameSync(binaryPath, newPath);
-      if (existsSync(oldPath)) renameSync(oldPath, binaryPath);
-      else renameSync(backupPath, binaryPath);
+      rmSync(oldPath, { force: true });
+      rmSync(backupPath, { force: true });
+      return true;
     };
 
     try {
-      // 1. download the new binary to <binaryPath>.new
+      // 1. the release must publish a checksums file (SHA256 is mandatory):
+      //    without one we refuse rather than install unverified bytes
+      if (!rel.sha256Url) {
+        warn(`update to ${rel.version}: release has no checksums asset, refusing unverified update`);
+        return { ok: false, rolledBack: false };
+      }
+
+      // 2. download the new binary to <binaryPath>.new
       const assetResp = await fetchFn(rel.assetUrl);
       if (!assetResp.ok) throw new Error(`asset download failed: HTTP ${assetResp.status}`);
       const bytes = new Uint8Array(await assetResp.arrayBuffer());
       writeFileSync(newPath, bytes);
 
-      // 2. verify against the release checksums file; a missing line or a
-      //    hash mismatch aborts before the current binary is ever touched
-      if (rel.sha256Url) {
-        const sumsResp = await fetchFn(rel.sha256Url);
-        if (!sumsResp.ok) throw new Error(`checksum download failed: HTTP ${sumsResp.status}`);
-        const expected = findChecksum(await sumsResp.text(), assetFileName(rel.assetUrl));
-        if (expected === null || expected !== sha256Hex(bytes)) {
-          warn(`update to ${rel.version}: checksum mismatch, keeping current binary`);
-          rmSync(newPath, { force: true });
-          return { ok: false, rolledBack: false };
-        }
+      // 3. verify against the checksums file; a missing line or a hash
+      //    mismatch aborts before the current binary is ever touched
+      const sumsResp = await fetchFn(rel.sha256Url);
+      if (!sumsResp.ok) throw new Error(`checksum download failed: HTTP ${sumsResp.status}`);
+      const expected = findChecksum(await sumsResp.text(), assetFileName(rel.assetUrl));
+      if (expected === null || expected !== sha256Hex(bytes)) {
+        warn(`update to ${rel.version}: checksum mismatch, keeping current binary`);
+        rmSync(newPath, { force: true });
+        return { ok: false, rolledBack: false };
       }
 
-      // 3. backup the current binary
+      // 4. backup the current binary
       copyFileSync(binaryPath, backupPath);
 
-      // 4. atomic replace; a running Windows exe cannot be overwritten but
+      // 5. atomic replace; a running Windows exe cannot be overwritten but
       //    can be renamed, so move it aside first (TECH-DESIGN §11)
       if (process.platform === "win32") {
-        renameSync(binaryPath, oldPath);
-        renameSync(newPath, binaryPath);
+        renameFn(binaryPath, oldPath);
+        originalMoved = true; // the original now exists only at .old
+        renameFn(newPath, binaryPath);
       } else {
-        renameSync(newPath, binaryPath);
+        renameFn(newPath, binaryPath);
+        originalMoved = true;
       }
-      replaced = true;
 
-      // 5. self-verify: the new binary must run and report the new version
+      // 6. self-verify: the new binary must run and report the new version
       const r = spawnFn(binaryPath, ["--version"]);
       if (r.status !== 0 || !r.stdout.includes(rel.version)) {
         warn(`update to ${rel.version}: self-verify failed (exit ${r.status}), rolling back`);
-        restoreOriginal();
-        // restoreOriginal parks the failed binary at .new; drop it and the
-        // now-redundant backup (force: whichever of them the rename consumed).
-        rmSync(newPath, { force: true });
-        rmSync(backupPath, { force: true });
-        return { ok: false, rolledBack: true };
+        return { ok: false, rolledBack: rollback() };
       }
 
-      // 6. success: clean up temps and backups
+      // 7. success: clean up temps and backups
       rmSync(oldPath, { force: true });
       rmSync(backupPath, { force: true });
       log(`updated to ${rel.version}`);
       return { ok: true, rolledBack: false };
     } catch (e) {
       error(`update to ${rel.version} failed: ${errorMessage(e)}`);
-      if (replaced) {
-        try {
-          restoreOriginal();
-        } catch (restoreErr) {
-          error(`rollback failed: ${errorMessage(restoreErr)}`);
-        }
+      if (!originalMoved) {
+        // the current binary was never touched; drop the temp download
+        rmSync(newPath, { force: true });
+        return { ok: false, rolledBack: false };
       }
-      rmSync(newPath, { force: true });
-      rmSync(oldPath, { force: true });
-      rmSync(backupPath, { force: true });
-      return { ok: false, rolledBack: replaced };
+      return { ok: false, rolledBack: rollback() };
     }
   }
 }

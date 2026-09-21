@@ -4,7 +4,7 @@
 // backup, rename-replace and rollback paths run for real on this platform.
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -19,7 +19,8 @@ import { UpdateManager, type SpawnFn } from "../../src/update/update-manager";
 
 const ASSET = platformAssetName();
 const ORIGINAL = "CURRENT-BINARY-BYTES-0.3.0";
-const NEW_BYTES = new TextEncoder().encode("#!/o2a2o-mock\nO2A2O-MOCK-NEW-BINARY-0.4.0\n");
+const NEW_TEXT = "#!/o2a2o-mock\nO2A2O-MOCK-NEW-BINARY-0.4.0\n";
+const NEW_BYTES = new TextEncoder().encode(NEW_TEXT);
 const NEW_HASH = createHash("sha256").update(NEW_BYTES).digest("hex");
 
 interface MockAsset {
@@ -104,7 +105,13 @@ function makeBinaryDir(): { dir: string; binaryPath: string } {
 
 function makeManager(
   binaryPath: string,
-  o: { allowPrerelease?: boolean; currentVersion?: string; spawnFn?: SpawnFn; now?: () => Date } = {},
+  o: {
+    allowPrerelease?: boolean;
+    currentVersion?: string;
+    spawnFn?: SpawnFn;
+    now?: () => Date;
+    renameFn?: (from: string, to: string) => void;
+  } = {},
 ): UpdateManager {
   return new UpdateManager({
     repo: "acme/o2a2o",
@@ -114,6 +121,7 @@ function makeManager(
     fetchFn: mockFetch,
     spawnFn: o.spawnFn ?? (() => ({ status: 0, stdout: "o2a2o 0.4.0", stderr: "" })),
     now: o.now,
+    renameFn: o.renameFn,
   });
 }
 
@@ -243,4 +251,59 @@ test("update: self-verify exit 0 but output missing the new version also rolls b
   const result = await mgr.update(rel!);
   expect(result).toEqual({ ok: false, rolledBack: true });
   expect(readFileSync(binaryPath, "utf8")).toBe(ORIGINAL);
+});
+
+// --- fix round 1 ---------------------------------------------------------
+
+test("update: release without a checksums asset is refused, current binary untouched", async () => {
+  const { binaryPath } = makeBinaryDir();
+  const mgr = makeManager(binaryPath);
+  const rel: ReleaseInfo = {
+    version: "0.4.0",
+    prerelease: false,
+    assetUrl: `${BASE}/download/v0.4.0/${ASSET}`,
+  };
+  const result = await mgr.update(rel);
+  expect(result).toEqual({ ok: false, rolledBack: false });
+  expect(readFileSync(binaryPath, "utf8")).toBe(ORIGINAL);
+  expect(existsSync(binaryPath + ".new")).toBe(false);
+  expect(existsSync(binaryPath + ".backup")).toBe(false);
+});
+
+test("update: crash between the two Windows renames restores the original from .old", async () => {
+  if (process.platform !== "win32") return; // the two-rename window exists only on win32
+  const { binaryPath } = makeBinaryDir();
+  let replaceRenameFailed = false; // fail only the replace's 2nd rename, not the restore's
+  const mgr = makeManager(binaryPath, {
+    renameFn: (from, to) => {
+      if (to === binaryPath && !replaceRenameFailed) {
+        replaceRenameFailed = true;
+        throw new Error("simulated crash between renames");
+      }
+      renameSync(from, to);
+    },
+  });
+  const result = await mgr.update(manualRel("v0.4.0"));
+  expect(result).toEqual({ ok: false, rolledBack: true });
+  // after the crash the original existed only at .old; it must come back
+  expect(readFileSync(binaryPath, "utf8")).toBe(ORIGINAL);
+  expect(existsSync(binaryPath + ".new")).toBe(false);
+  expect(existsSync(binaryPath + ".old")).toBe(false);
+  expect(existsSync(binaryPath + ".backup")).toBe(false);
+});
+
+test("update: failed rollback keeps the recovery copies and reports rolledBack false", async () => {
+  const { binaryPath } = makeBinaryDir();
+  const mgr = makeManager(binaryPath, {
+    spawnFn: () => ({ status: 1, stdout: "", stderr: "boom" }), // force the rollback path
+    renameFn: (from, to) => {
+      if (to === binaryPath + ".new") throw new Error("simulated restore failure"); // park move fails
+      renameSync(from, to);
+    },
+  });
+  const result = await mgr.update(manualRel("v0.4.0"));
+  expect(result).toEqual({ ok: false, rolledBack: false }); // restore did NOT succeed
+  expect(readFileSync(binaryPath, "utf8")).toBe(NEW_TEXT); // still the unverified binary
+  expect(existsSync(binaryPath + ".old")).toBe(true); // recovery copies retained
+  expect(existsSync(binaryPath + ".backup")).toBe(true);
 });
