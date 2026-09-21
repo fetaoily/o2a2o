@@ -80,11 +80,22 @@ export function anthropicToIr(body: unknown): ConvResult {
   };
 }
 
-// IRContentPart -> anthropic content block.
-function partToBlock(p: IRContentPart): Record<string, unknown> {
+// IRContentPart -> anthropic content block, or null when the part is skipped.
+// URL-sourced images have no anthropic representation (anthropic accepts
+// base64 image sources only): they are warned about, recorded as "image_url"
+// in `dropped` when the caller provides the channel, and skipped.
+function partToBlock(p: IRContentPart, dropped?: string[]): Record<string, unknown> | null {
   switch (p.type) {
     case "text": return { type: "text", text: p.text };
-    case "image": return { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.data } };
+    case "image":
+      if (p.mediaType === "url") {
+        let host = "";
+        try { host = new URL(p.data).host; } catch { /* data is not a parseable URL */ }
+        console.warn(`[anthropic] skipping url-sourced image (host: ${host || "unparseable"}): anthropic supports base64 image sources only`);
+        dropped?.push("image_url");
+        return null;
+      }
+      return { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.data } };
     case "tool_use": return { type: "tool_use", id: p.id, name: p.name, input: p.input };
     case "tool_result": return { type: "tool_result", tool_use_id: p.toolUseId, content: p.content };
   }
@@ -101,13 +112,18 @@ function toolChoiceToAnthropic(ir: IRRequest): Record<string, unknown> | undefin
   return { type: "tool", name: ir.toolChoice.name };
 }
 
-export function irToAnthropic(ir: IRRequest): Record<string, unknown> {
+// IRRequest -> anthropic messages body. `dropped`, when provided, collects the
+// names of parts that had to be skipped during conversion (e.g. "image_url"
+// for url-sourced images).
+export function irToAnthropic(ir: IRRequest, dropped?: string[]): Record<string, unknown> {
   const messages: Record<string, unknown>[] = [];
   for (const m of ir.messages) {
     if (m.role === "tool") {
       // anthropic requires tool_result blocks to ride on user messages;
       // consecutive tool messages merge into a single user message.
-      const blocks = (Array.isArray(m.content) ? m.content : []).map(partToBlock);
+      const blocks = (Array.isArray(m.content) ? m.content : [])
+        .map((p) => partToBlock(p, dropped))
+        .filter((b): b is Record<string, unknown> => b !== null);
       const prev = messages[messages.length - 1];
       if (prev?.role === "user" && Array.isArray(prev.content)) prev.content.push(...blocks);
       else messages.push({ role: "user", content: blocks });
@@ -122,7 +138,12 @@ export function irToAnthropic(ir: IRRequest): Record<string, unknown> {
       messages.push({ role: m.role, content: m.content[0].text });
       continue;
     }
-    messages.push({ role: m.role, content: m.content.map(partToBlock) });
+    messages.push({
+      role: m.role,
+      content: m.content
+        .map((p) => partToBlock(p, dropped))
+        .filter((b): b is Record<string, unknown> => b !== null),
+    });
   }
   const out: Record<string, unknown> = {
     model: ir.model,
@@ -192,7 +213,7 @@ export function irToAnthropicResponse(ir: IRResponse): Record<string, unknown> {
     type: "message",
     role: "assistant",
     model: ir.model,
-    content: ir.content.map(partToBlock),
+    content: ir.content.map((p) => partToBlock(p)).filter((b): b is Record<string, unknown> => b !== null),
     stop_reason: IR_TO_STOP[ir.stopReason],
     stop_sequence: null,
     usage: { input_tokens: ir.usage.inputTokens, output_tokens: ir.usage.outputTokens },

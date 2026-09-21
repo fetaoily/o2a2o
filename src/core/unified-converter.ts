@@ -16,7 +16,7 @@ import { resolveKey, forwardToUpstream } from "./forwarder";
 import { calculateTimeout, latencyTracker } from "./timeout-calculator";
 import { detectFormat } from "./format-detector";
 import { warn } from "../utils/logger";
-import type { IRResponse } from "../types/ir";
+import type { IRRequest, IRResponse } from "../types/ir";
 import { ParamError, chatToIr, irToChat, chatResponseToIr, irToChatResponse } from "../converters/chat";
 import { anthropicToIr, irToAnthropic, anthropicResponseToIr, irToAnthropicResponse } from "../converters/anthropic";
 import { responsesToIr, irToResponsesResponse, responsesResponseToIr } from "../converters/responses";
@@ -44,7 +44,11 @@ const FORMAT_PROVIDER: Record<InputFormat, Provider> = {
 };
 
 const TO_IR = { openai_chat: chatToIr, openai_responses: responsesToIr, anthropic: anthropicToIr };
-const FROM_IR = { openai: irToChat, anthropic: irToAnthropic };
+// Both request converters accept an optional `dropped` collector for parts
+// they must skip during outbound conversion (irToChat never pushes to it).
+const FROM_IR: Record<Provider, (ir: IRRequest, dropped?: string[]) => Record<string, unknown>> = {
+  openai: irToChat, anthropic: irToAnthropic,
+};
 
 // FR-2 response matrix: the upstream natively returns the shape of the endpoint
 // the request was sent to (`nativeFormat`). The response is passed through raw
@@ -112,7 +116,9 @@ function resolveRoute(
     const conv = TO_IR[format](cleanBody);                       // { ir, dropped } | throws ParamError
     dropped = conv.dropped.length ? conv.dropped : undefined;
     const ir = { ...conv.ir, model: model.name };
-    upstreamBody = FROM_IR[targetProvider](ir);                  // irToChat | irToAnthropic
+    const outboundDropped: string[] = [];
+    upstreamBody = FROM_IR[targetProvider](ir, outboundDropped); // irToChat | irToAnthropic
+    if (outboundDropped.length) dropped = [...(dropped ?? []), ...outboundDropped];
   }
   if (wantsStream) upstreamBody = { ...upstreamBody, stream: true };
   const endpoint = targetProvider === "anthropic" ? "/v1/messages"

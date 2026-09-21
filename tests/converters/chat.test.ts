@@ -146,3 +146,7 @@ test("irToChat stringifies tool_result array content instead of [object Object]"
   expect(out.messages[1].content).toBe("ok");
   expect(out.messages[1].tool_call_id).toBe("c1");
 });
+
+test("tool_call missing function -> ParamError", () => {
+  expect(() => chatToIr({ model: "m", messages: [{ role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function" }] }] })).toThrow(ParamError);
+});

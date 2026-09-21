@@ -78,6 +78,7 @@ export function chatToIr(body: unknown): ConvResult {
       const parts: IRContentPart[] = [];
       if (m.content) parts.push({ type: "text", text: String(m.content) });
       for (const c of m.tool_calls) {
+        if (!c.function?.name) throw new ParamError("malformed tool call: missing function name");
         const raw = c.function?.arguments;
         let input: unknown;
         try { input = JSON.parse(raw || "{}"); }

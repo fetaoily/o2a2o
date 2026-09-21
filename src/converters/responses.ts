@@ -170,7 +170,14 @@ export function responsesResponseToIr(res: unknown): IRResponse {
         .map((p) => p.text);
       if (texts.length > 0) parts.push({ type: "text", text: texts.join("") });
     } else if (item?.type === "function_call") {
-      parts.push({ type: "tool_use", id: item.call_id ?? "", name: item.name ?? "", input: JSON.parse(item.arguments || "{}") });
+      let input: unknown;
+      try { input = JSON.parse(item.arguments || "{}"); }
+      catch {
+        // upstream data, not a client error: degrade instead of failing the request
+        input = {};
+        console.warn(`[openai_responses] malformed function_call arguments from upstream for ${String(item.name)}, degrading to empty input`);
+      }
+      parts.push({ type: "tool_use", id: item.call_id ?? "", name: item.name ?? "", input });
     } else {
       console.warn(`[openai_responses] skipping unsupported output item type: ${String(item?.type)}`);
     }

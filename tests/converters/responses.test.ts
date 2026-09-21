@@ -100,3 +100,9 @@ test("image parts serialize to input_image in message items", () => {
     { type: "input_image", image_url: "https://example.com/x.png" },
   ]);
 });
+
+test("malformed upstream arguments degrade instead of throwing", () => {
+  const ir = responsesResponseToIr({ id: "r", model: "m", status: "completed",
+    output: [{ id: "fc", type: "function_call", call_id: "c1", name: "f", arguments: "{bad" }], usage: { input_tokens: 1, output_tokens: 1 } });
+  expect((ir.content[0] as any).input).toEqual({});
+});
