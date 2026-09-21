@@ -10,11 +10,11 @@
 // The detect/alias/model/key/request-conversion prefix is shared verbatim by
 // the non-stream path (handleGatewayRequest) and the streaming path
 // (handleGatewayStream, M2).
-import type { AppConfig, ModelConfig } from "../config/loader";
+import type { AppConfig, ModelConfig, TimeoutConfig } from "../config/loader";
 import { resolveTimeoutConfig, resolveFailoverConfig } from "../config/loader";
 import type { Provider } from "./forwarder";
 import type { InputFormat } from "./format-detector";
-import { forwardToUpstream, forwardWithFailover, KeyPoolRegistry } from "./forwarder";
+import { forwardToUpstream, forwardWithFailover, KeyPoolRegistry, isRetryableUpstreamError } from "./forwarder";
 import { calculateTimeout, latencyTracker } from "./timeout-calculator";
 import { detectFormat } from "./format-detector";
 import { warn } from "../utils/logger";
@@ -22,7 +22,7 @@ import type { IRRequest, IRResponse } from "../types/ir";
 import { ParamError, chatToIr, irToChat, chatResponseToIr, irToChatResponse } from "../converters/chat";
 import { anthropicToIr, irToAnthropic, anthropicResponseToIr, irToAnthropicResponse } from "../converters/anthropic";
 import { responsesToIr, irToResponsesResponse, responsesResponseToIr } from "../converters/responses";
-import { StreamTimeoutManager } from "./stream-timeout-manager";
+import { StreamTimeoutManager, StreamTimeoutError } from "./stream-timeout-manager";
 import { pipeThrough, convertStream } from "./stream-converter";
 import { AnthropicStreamEncoder } from "../converters/stream-anthropic";
 import { ChatStreamEncoder } from "../converters/stream-chat";
@@ -206,38 +206,99 @@ function errorFrame(dstFormat: InputFormat, message: string): string {
   return enc.push({ type: "error", message });
 }
 
-// Arms the timeout monitor around the converted stream so the timeout
-// contract holds even while a read from the upstream is in flight: on fire,
-// the target-format error frame is enqueued and the stream closed. Late
-// upstream data after the error frame is dropped and the upstream body is
-// cancelled. The monitor itself disarms on every other terminal path (source
-// close / source error / downstream cancel), so this wrapper only owns the
-// timeout path.
-function withTimeoutGuard(
-  inner: ReadableStream<Uint8Array>,
-  monitor: StreamTimeoutManager,
-  dstFormat: InputFormat,
-): ReadableStream<Uint8Array> {
+// One stream-establishment attempt (M3): send the SSE request, wire the M2
+// conversion pipeline (a fresh StreamTimeoutManager and fresh converters per
+// attempt), then race the upstream's first output byte against the
+// first_packet budget. The monitor's single fire callback serves both phases:
+// before the first byte (no client stream exists yet) it cancels the
+// half-open upstream stream and fails the attempt, letting the caller retry
+// on the pool's next key; after the first byte it keeps the M2 semantics —
+// the target-format error frame is enqueued, the stream closed and late
+// upstream data dropped. The already-read first chunk is delivered by the
+// returned stream first; nothing beyond it is buffered, and losing attempts
+// never produce a client stream at all (zero-byte guarantee).
+async function establishUpstreamStream(opts: {
+  provider: Provider;
+  endpoint: "/v1/chat/completions" | "/v1/responses" | "/v1/messages";
+  body: Record<string, unknown>;
+  key: string;
+  timeoutMs: number;
+  srcFormat: InputFormat;
+  dstFormat: InputFormat;
+  meta: { id: string; model: string };
+  timeouts: TimeoutConfig["stream"];
+}): Promise<{ kind: "ok"; stream: ReadableStream<Uint8Array> } | { kind: "fail"; error: unknown }> {
+  let upstreamRes: Response;
+  try {
+    upstreamRes = await forwardToUpstream({
+      provider: opts.provider, endpoint: opts.endpoint, body: opts.body,
+      key: opts.key, timeoutMs: opts.timeoutMs, accept: "text/event-stream",
+    });
+  } catch (e) {
+    return { kind: "fail", error: e };   // headers phase: UpstreamError, network failures, ...
+  }
+  const source = upstreamRes.body;
+  if (!source) return { kind: "fail", error: new Error("upstream returned an empty body for a streaming request") };
+
+  const monitor = new StreamTimeoutManager(opts.timeouts);
+  const inner = opts.srcFormat === opts.dstFormat
+    ? pipeThrough(source, monitor)
+    : convertStream({
+        srcFormat: opts.srcFormat,
+        dstFormat: opts.dstFormat,
+        source,
+        monitor,
+        meta: opts.meta,
+      });
+
   const reader = inner.getReader();
   const output = new TextEncoder();
   let timedOut = false;
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      monitor.arm((err) => {
-        timedOut = true;
-        try { controller.enqueue(output.encode(errorFrame(dstFormat, err.message))); } catch { /* already closed */ }
-        try { controller.close(); } catch { /* already closed */ }
-        void reader.cancel().catch(() => {});
-      });
-    },
+  let outController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let failure: StreamTimeoutError | undefined;
+  let first: Awaited<ReturnType<typeof reader.read>> | undefined;
+  let readError: unknown;
+  let wake: () => void = () => {};
+  const settled = new Promise<void>((resolve) => { wake = resolve; });
+
+  monitor.arm((err) => {
+    if (outController) {
+      // Post-first-byte fire (idle/total, D5): the client holds the error
+      // frame and the close; late upstream data is dropped.
+      timedOut = true;
+      try { outController.enqueue(output.encode(errorFrame(opts.dstFormat, err.message))); } catch { /* already closed */ }
+      try { outController.close(); } catch { /* already closed */ }
+    } else {
+      // Pre-first-byte fire: nothing reached the client. Drop the half-open
+      // stream; the establishment loop records the failure and retries.
+      failure = err;
+    }
+    void reader.cancel().catch(() => {});
+    wake();
+  });
+
+  void (async () => {
+    try { first = await reader.read(); } catch (e) { readError = e; }
+    wake();
+  })();
+  await settled;
+  if (failure) return { kind: "fail", error: failure };
+  if (readError !== undefined) return { kind: "fail", error: readError };
+
+  let pending = first;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) { outController = controller; },
     async pull(controller) {
-      let chunk;
-      try {
-        chunk = await reader.read();
-      } catch (e) {
-        monitor.disarm();
-        controller.error(e);
-        return;
+      let chunk = pending;
+      pending = undefined;
+      if (!chunk) {
+        try {
+          chunk = await reader.read();
+        } catch (e) {
+          monitor.disarm();
+          controller.error(e);
+          return;
+        }
       }
       if (timedOut) return;              // client already holds the error frame + close
       if (chunk.done) { controller.close(); return; }
@@ -245,9 +306,10 @@ function withTimeoutGuard(
     },
     cancel(reason) {
       monitor.disarm();
-      return inner.cancel(reason);
+      return reader.cancel(reason);
     },
   });
+  return { kind: "ok", stream };
 }
 
 // Envelope metadata for a converted stream: the resolved model name plus a
@@ -258,13 +320,32 @@ function streamMeta(outFormat: InputFormat, model: string): { id: string; model:
   return { id: prefix + crypto.randomUUID(), model };
 }
 
-// Streaming main path (M2): the same first half as the non-stream path, then
-// the upstream is called with stream:true and Accept SSE. Its byte stream is
-// piped through verbatim when source and output formats match, otherwise
-// converted through the StreamEvent hub. Upstream non-2xx throws before any
-// bytes reach the client, so server.ts renders it through the M1 error path;
-// stream-timeout errors are encoded as a target-format error frame and the
-// stream closes right after it.
+// Exhaustion before the first byte: the client's SSE response closes after a
+// single target-format error frame; no finish frames follow an error (the
+// codecs' contract, same as mid-stream errors).
+function errorFrameStream(dstFormat: InputFormat, message: string): ReadableStream<Uint8Array> {
+  const frame = errorFrame(dstFormat, message);
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(frame));
+      controller.close();
+    },
+  });
+}
+
+// Streaming main path (M2, M3 Task 4): the same first half as the non-stream
+// path, then stream establishment runs as a pre-first-packet failover loop —
+// the retry window closes when the winning upstream delivers its first byte.
+// Headers-phase failures classify exactly like the non-stream loop (D4); a
+// first_packet timeout fires while the client has received zero bytes, so the
+// half-open stream is dropped and establishment re-runs on the pool's next
+// key (fresh manager + fresh stream). After the first byte everything is M2
+// semantics (D5): idle/total timeouts and mid-stream errors surface in-band
+// and never switch keys. During retries nothing is buffered and no client
+// stream exists yet, so the zero-byte guarantee holds by construction.
+// Exhaustion renders a single first_packet error frame + close (M2 encoding
+// path); every other terminal failure throws into the M1 error path, which
+// renders UpstreamError as a JSON error response.
 export async function handleGatewayStream(
   cfg: AppConfig,
   path: string,
@@ -278,31 +359,61 @@ export async function handleGatewayStream(
   // Streams carry no token estimate; by_model overrides and the latency
   // feedback still bound the time to upstream response headers.
   const timeoutMs = calculateTimeout({ model: model.name, maxTokens: 0, isStream: true, tc: resolveTimeoutConfig(cfg) });
-  // Interim single selection (M3 Task 4 replaces this segment with the
-  // pre-first-packet failover loop): a dynamic key is used per-request with no
-  // pool interaction, otherwise the pool's best key serves.
-  const key = dynamicKey ?? KeyPoolRegistry.from(cfg).poolFor(model).select().key;
-  const upstreamRes = await forwardToUpstream({
-    provider: targetProvider, endpoint, body: upstreamBody, key, timeoutMs, accept: "text/event-stream",
-  });
-  const source = upstreamRes.body;
-  if (!source) throw new Error("upstream returned an empty body for a streaming request");
-
   const srcFormat = nativeFormatOf(targetProvider, format);
-  const monitor = new StreamTimeoutManager(resolveTimeoutConfig(cfg).stream);
-  const inner = srcFormat === outFormat
-    ? pipeThrough(source, monitor)
-    : convertStream({
-        srcFormat,
-        dstFormat: outFormat,
-        source,
-        monitor,
-        meta: streamMeta(outFormat, model.name),
-      });
-  return {
-    status: 200,
-    stream: withTimeoutGuard(inner, monitor, outFormat),
-    contentType: "text/event-stream",
-    droppedParams: dropped,
-  };
+  // A dynamic key makes a single per-request attempt with no pool interaction
+  // (non-stream mirror); configured keys establish through the pool's
+  // pre-first-packet failover loop. poolFor throws when neither model keys nor
+  // a provider-wide key exist (M2 semantics).
+  const pool = dynamicKey ? undefined : KeyPoolRegistry.from(cfg).poolFor(model);
+  const attempts = dynamicKey ? 1 : Math.max(1, resolveFailoverConfig(cfg).max_retries);
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    pool?.maybeRecover();
+    const decision = pool ? pool.select() : undefined;
+    const start = Date.now();
+    const established = await establishUpstreamStream({
+      provider: targetProvider, endpoint, body: upstreamBody,
+      key: decision ? decision.key : dynamicKey as string,
+      timeoutMs,
+      srcFormat,
+      dstFormat: outFormat,
+      meta: streamMeta(outFormat, model.name),
+      timeouts: resolveTimeoutConfig(cfg).stream,
+    });
+    if (established.kind === "ok") {
+      // The winning key's first-packet latency feeds its own scoring samples;
+      // the model-level latencyTracker stays non-stream-only so stream TTFB
+      // cannot poison the adaptive floor (M2 ruling).
+      if (pool && decision) pool.recordSuccess(decision.keyId, Date.now() - start);
+      return {
+        status: 200,
+        stream: established.stream,
+        contentType: "text/event-stream",
+        droppedParams: dropped,
+      };
+    }
+    lastError = established.error;
+    // Key-level failures demote the key and switch (network/timeout/5xx/429/
+    // 401/403, plus the pre-first-byte first_packet timeout); request-level
+    // failures surface immediately without recording (D4, non-stream mirror).
+    const retryable = lastError instanceof StreamTimeoutError
+      ? lastError.retryable
+      : isRetryableUpstreamError(lastError);
+    if (!retryable) break;
+    if (pool && decision) pool.recordFailure(decision.keyId);
+  }
+  // Retries exhausted (or a terminal request-level failure): a first_packet
+  // timeout renders as one in-band target-format error frame + close (the
+  // client has seen no data, so nothing is duplicated); anything else keeps
+  // the M2 throw-into-the-error-path semantics.
+  if (lastError instanceof StreamTimeoutError && lastError.stage === "first_packet") {
+    return {
+      status: 200,
+      stream: errorFrameStream(outFormat, lastError.message),
+      contentType: "text/event-stream",
+      droppedParams: dropped,
+    };
+  }
+  throw lastError;
 }

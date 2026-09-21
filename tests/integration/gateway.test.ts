@@ -1,10 +1,14 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startGateway } from "../../src/server";
+import { KeyPoolRegistry } from "../../src/core/forwarder";
+import { maskKey } from "../../src/utils/logger";
 import type { AppConfig } from "../../src/config/loader";
 
 let anthropicUp: ReturnType<typeof Bun.serve>; let openaiUp: ReturnType<typeof Bun.serve>;
 let gw: ReturnType<typeof Bun.serve>; let streamGw: ReturnType<typeof Bun.serve>;
 let slowUp: Bun.TCPSocketListener<{ responded?: boolean }>;
+let foUp: Bun.TCPSocketListener;
+let headersFailUp: ReturnType<typeof Bun.serve>;
 
 // File-level so the auth-bearing gateway variant (S11) can derive from it.
 const cfgBase: AppConfig = {
@@ -47,6 +51,64 @@ const responsesSseFixture =
   'data: {"type":"response.created","response":{"id":"resp_s","object":"response","created_at":1,"model":"gpt-4o","status":"in_progress"}}\n\n' +
   'data: {"type":"response.output_text.delta","item_id":"msg_s","output_index":0,"content_index":0,"delta":"stream-hello"}\n\n' +
   'data: {"type":"response.completed","response":{"id":"resp_s","object":"response","created_at":1,"model":"gpt-4o","status":"completed","output":[{"id":"msg_s","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"stream-hello","annotations":[]}]}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}\n\n';
+
+// ---------------------------------------------------------------------------
+// M3 Task 4 fixtures: stream first-packet failover across keys
+// ---------------------------------------------------------------------------
+
+const K_FO_SLOW = "sk-fo-slow-key-aaaaaaaa-1111";
+const K_FO_FAST = "sk-fo-fast-key-bbbbbbbb-2222";
+const K_FO_HDR = "sk-fo-hdr-key-cccccccc-3333";
+
+// Fresh cfg per test: KeyPoolRegistry caches one pool set per cfg object, so
+// a new object means an untouched pool. Inherits streamCfg's first_packet:100.
+const foCfg = (): AppConfig => ({
+  ...streamCfg,
+  models: [{
+    name: "gpt-4o", provider: "openai",
+    api_keys: [{ key: K_FO_SLOW, priority: 1 }, { key: K_FO_FAST, priority: 2 }],
+  }],
+  aliases: {}, api_keys: {},
+});
+
+// Routing state for foUp / headersFailUp, reset by each failover test.
+let foSlowKeys = new Set<string>();
+let foSlowClosed = 0;   // torn-down slow-key sockets (half-open streams)
+let foRequests = 0;     // requests the failover upstream saw
+let headersFailSeen = 0;
+
+const chunked = (body: string): string => `${body.length.toString(16)}\r\n${body}\r\n0\r\n\r\n`;
+const SSE_HEADERS = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+
+// Bun.listen's socket.data is shared across sockets on this platform (a fresh
+// socket inherits the previous socket's mutated fields), so per-connection
+// state lives in a WeakMap keyed by the socket object instead.
+interface RawSockState {
+  buf: string;
+  everSlow?: boolean;
+  hold?: { timer: ReturnType<typeof setTimeout>; alive: boolean };
+}
+const rawSocks = new WeakMap<object, RawSockState>();
+
+// Buffered request reader: returns the next complete HTTP request (header
+// block + content-length body), or null while the request is still in flight.
+// Serving on complete requests only means a request split across several data
+// events is never answered twice.
+function takeRawRequest(socket: object): string | null {
+  let st = rawSocks.get(socket);
+  if (!st) {
+    st = { buf: "" };
+    rawSocks.set(socket, st);
+  }
+  const end = st.buf.indexOf("\r\n\r\n");
+  if (end < 0) return null;
+  const cl = /content-length:\s*(\d+)/i.exec(st.buf.slice(0, end));
+  const total = end + 4 + (cl ? Number(cl[1]) : 0);
+  if (st.buf.length < total) return null;
+  const request = st.buf.slice(0, total);
+  st.buf = st.buf.slice(total);
+  return request;
+}
 
 beforeAll(() => {
   anthropicUp = Bun.serve({
@@ -92,25 +154,90 @@ beforeAll(() => {
   // Raw-socket upstream for the first-packet test: writes SSE headers
   // immediately but holds the first body byte for 500ms. Bun.serve only
   // flushes stream-response headers on the first body byte, which would
-  // defeat a first_packet budget shorter than the delay.
-  slowUp = Bun.listen<{ responded?: boolean }>({
+  // defeat a first_packet budget shorter than the delay. Every complete
+  // request gets the hold treatment (the M3 failover loop may retry here).
+  slowUp = Bun.listen({
     hostname: "127.0.0.1", port: 0,
     data: {},
     socket: {
-      data(socket) {
-        if (socket.data.responded) return;
-        socket.data.responded = true;
-        socket.write("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n");
-        setTimeout(() => {
-          const frame = `${openaiSseFixture.length.toString(16)}\r\n${openaiSseFixture}\r\n0\r\n\r\n`;
-          try { socket.write(frame); socket.end(); } catch { /* client gone */ }
-        }, 500);
+      data(socket, chunk) {
+        const st = rawSocks.get(socket) ?? { buf: "" };
+        st.buf += Buffer.from(chunk).toString("latin1");
+        rawSocks.set(socket, st);
+        for (;;) {
+          if (takeRawRequest(socket) === null) return;
+          socket.write(SSE_HEADERS);
+          setTimeout(() => {
+            try { socket.write(chunked(openaiSseFixture)); socket.end(); } catch { /* client gone */ }
+          }, 500);
+        }
       },
       error() {},
     },
   });
+  // Per-key raw-socket upstream for the failover tests (Bun.serve only
+  // flushes stream-response headers on the first body byte, which would
+  // defeat a first_packet budget shorter than the delay): keys listed in
+  // foSlowKeys get headers immediately and their first byte 500ms late;
+  // every other key gets the fixture immediately. Every complete request is
+  // served, and a new exchange cancels the previous hold's late write.
+  foUp = Bun.listen({
+    hostname: "127.0.0.1", port: 0,
+    data: {},
+    socket: {
+      data(socket, chunk) {
+        const st = rawSocks.get(socket) ?? { buf: "" };
+        st.buf += Buffer.from(chunk).toString("latin1");
+        rawSocks.set(socket, st);
+        for (;;) {
+          const request = takeRawRequest(socket);
+          if (request === null) return;
+          if (st.hold) {                         // stale hold: its late write must not leak into this response
+            clearTimeout(st.hold.timer);
+            st.hold.alive = false;
+            st.hold = undefined;
+          }
+          foRequests += 1;
+          const auth = /authorization:\s*Bearer\s+(\S+)/i.exec(request)?.[1] ?? "";
+          if (foSlowKeys.has(auth)) {
+            st.everSlow = true;
+            const hold: { timer: ReturnType<typeof setTimeout>; alive: boolean } = { timer: undefined as never, alive: true };
+            st.hold = hold;
+            socket.write(SSE_HEADERS);
+            hold.timer = setTimeout(() => {
+              if (!hold.alive) return;
+              st.hold = undefined;
+              try { socket.write(chunked(openaiSseFixture)); socket.end(); } catch { /* client gone */ }
+            }, 500);
+          } else {
+            socket.write(SSE_HEADERS + chunked(openaiSseFixture));
+            socket.end();
+          }
+        }
+      },
+      close(socket) {
+        const st = rawSocks.get(socket);
+        if (st?.everSlow) foSlowClosed += 1;
+      },
+      error() {},
+    },
+  });
+  // Headers-phase failure upstream: the first-priority key gets a 500 before
+  // any stream bytes; every other key serves the normal SSE fixture.
+  headersFailUp = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    fetch(req) {
+      headersFailSeen += 1;
+      if (req.headers.get("authorization") === `Bearer ${K_FO_SLOW}`)
+        return Response.json({ error: { message: "key exploded" } }, { status: 500 });
+      return new Response(openaiSseFixture, { headers: { "content-type": "text/event-stream" } });
+    },
+  });
 });
-afterAll(() => { gw.stop(true); streamGw.stop(true); anthropicUp.stop(true); openaiUp.stop(true); slowUp.stop(true); });
+afterAll(() => {
+  gw.stop(true); streamGw.stop(true); anthropicUp.stop(true); openaiUp.stop(true); slowUp.stop(true);
+  foUp.stop(true); headersFailUp.stop(true);
+});
 
 let anthropicSeen: any; let openaiSeen: any;
 const post = (p: string, b: unknown, h: Record<string, string> = {}) =>
@@ -324,4 +451,105 @@ test("S11: auth_token enforced", async () => {
   const withAuth = await fetch(`http://127.0.0.1:${authGw.port}/v1/models`, { headers: { authorization: "Bearer sec" } });
   expect(withAuth.status).toBe(200);
   authGw.stop(true);
+});
+
+// ---------------------------------------------------------------------------
+// M3 Task 4: stream first-packet failover across keys
+// ---------------------------------------------------------------------------
+
+const postFo = (port: number | undefined, b: unknown, h: Record<string, string> = {}) =>
+  fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: "POST", headers: { "content-type": "application/json", ...h }, body: JSON.stringify(b),
+  });
+const streamBody = () => ({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }], stream: true });
+
+test("M3 failover: slow first-packet key A fails over to fast key B, client sees only B's stream", async () => {
+  foSlowKeys = new Set([K_FO_SLOW]); foSlowClosed = 0; foRequests = 0;
+  const cfg = foCfg();
+  const foGw = startGateway(cfg);
+  const prevUp = process.env.O2A2O_UPSTREAM_OPENAI;
+  process.env.O2A2O_UPSTREAM_OPENAI = `http://127.0.0.1:${foUp.port}`;
+  try {
+    const res = await postFo(foGw.port, streamBody());
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    const text = await res.text();
+    expect(text).toBe(openaiSseFixture);                       // B's normal stream, byte-identical
+    expect(foRequests).toBe(2);                                // A's attempt + B's attempt
+    for (let i = 0; i < 100 && foSlowClosed === 0; i++) await Bun.sleep(10);
+    expect(foSlowClosed).toBeGreaterThanOrEqual(1);            // A's half-open socket torn down
+    const snap = KeyPoolRegistry.from(cfg).poolFor(cfg.models[0]).snapshot();
+    expect(snap[maskKey(K_FO_SLOW)].totalFailures).toBe(1);    // A recorded as failed
+    expect(snap[maskKey(K_FO_FAST)].latencySamples).toHaveLength(1); // B's first-packet latency recorded
+    expect(snap[maskKey(K_FO_FAST)].totalFailures).toBe(0);
+  } finally {
+    foGw.stop(true);
+    process.env.O2A2O_UPSTREAM_OPENAI = prevUp;
+  }
+});
+
+test("M3 failover exhausted: all keys slow -> first_packet error frame after max_retries attempts", async () => {
+  foSlowKeys = new Set([K_FO_SLOW, K_FO_FAST]); foSlowClosed = 0; foRequests = 0;
+  const cfg = foCfg();
+  const foGw = startGateway(cfg);
+  const prevUp = process.env.O2A2O_UPSTREAM_OPENAI;
+  process.env.O2A2O_UPSTREAM_OPENAI = `http://127.0.0.1:${foUp.port}`;
+  try {
+    const res = await postFo(foGw.port, streamBody());
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    const text = await res.text();
+    expect(text).toContain("stream timeout: first_packet");
+    expect(text).toContain('"error"');
+    expect(text).not.toContain("stream-hello");                 // the late frames never surface
+    expect(text.trimEnd().endsWith("data: [DONE]")).toBe(false); // no finish frames after an error
+    expect(foRequests).toBe(3);                                 // max_retries default bounds total attempts
+    const snap = KeyPoolRegistry.from(cfg).poolFor(cfg.models[0]).snapshot();
+    const failures = Object.keys(snap).filter((k) => k !== "keys")
+      .reduce((sum, id) => sum + snap[id].totalFailures, 0);
+    expect(failures).toBe(3);                                   // every attempt recorded a key failure
+  } finally {
+    foGw.stop(true);
+    process.env.O2A2O_UPSTREAM_OPENAI = prevUp;
+  }
+});
+
+test("M3 failover: headers-phase 500 on key A falls over to key B before any bytes", async () => {
+  headersFailSeen = 0;
+  const cfg = foCfg();
+  const foGw = startGateway(cfg);
+  const prevUp = process.env.O2A2O_UPSTREAM_OPENAI;
+  process.env.O2A2O_UPSTREAM_OPENAI = `http://127.0.0.1:${headersFailUp.port}`;
+  try {
+    const res = await postFo(foGw.port, streamBody());
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    const text = await res.text();
+    expect(text).toBe(openaiSseFixture);                        // B served normally
+    expect(headersFailSeen).toBe(2);                            // A's 500 then B's success
+    const snap = KeyPoolRegistry.from(cfg).poolFor(cfg.models[0]).snapshot();
+    expect(snap[maskKey(K_FO_SLOW)].totalFailures).toBe(1);
+    expect(snap[maskKey(K_FO_FAST)].totalFailures).toBe(0);
+  } finally {
+    foGw.stop(true);
+    process.env.O2A2O_UPSTREAM_OPENAI = prevUp;
+  }
+});
+
+test("M3 failover: dynamic header key makes a single attempt with no pool interaction", async () => {
+  foSlowKeys = new Set([K_FO_HDR]); foSlowClosed = 0; foRequests = 0;
+  const cfg = foCfg();
+  const foGw = startGateway(cfg);
+  const prevUp = process.env.O2A2O_UPSTREAM_OPENAI;
+  process.env.O2A2O_UPSTREAM_OPENAI = `http://127.0.0.1:${foUp.port}`;
+  try {
+    const res = await postFo(foGw.port, streamBody(), { "x-o2a2o-openai-key": K_FO_HDR });
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    const text = await res.text();
+    expect(text).toContain("stream timeout: first_packet");     // M2 semantics, no retry
+    expect(foRequests).toBe(1);                                 // single attempt, no key switch
+    const snap = KeyPoolRegistry.from(cfg).poolFor(cfg.models[0]).snapshot();
+    expect(snap[maskKey(K_FO_SLOW)].totalFailures).toBe(0);     // pool untouched
+    expect(snap[maskKey(K_FO_FAST)].totalFailures).toBe(0);
+  } finally {
+    foGw.stop(true);
+    process.env.O2A2O_UPSTREAM_OPENAI = prevUp;
+  }
 });
