@@ -1,0 +1,66 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+            targets: "darwin-arm64,darwin-x64"
+          - os: ubuntu-latest
+            platform: linux
+            targets: "linux-arm64,linux-x64"
+          - os: windows-latest
+            platform: windows
+            targets: "windows-x64"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.7"
+      - run: bun install
+      # Native per-platform builds only: no cross-compile, no bun#25346 cache seeding needed.
+      - run: bun run build:platform -- ${{ matrix.targets }}
+      - run: bun run package:${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}
+          path: |
+            dist/o2a2o-*
+            dist/installers/*
+            dist/checksums.txt
+            dist/installers/checksums.txt
+          if-no-files-found: error
+
+  release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Merge checksums
+        run: |
+          cd artifacts
+          cat dist/checksums.txt dist/installers/checksums.txt > RELEASE-CHECKSUMS.txt 2>/dev/null || \
+            cat installers/checksums.txt > RELEASE-CHECKSUMS.txt
+      - name: Create prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --prerelease \
+            --title "${{ github.ref_name }} (Release Candidate)" \
+            --notes "RC build for testing - not stable. Verify checksums in RELEASE-CHECKSUMS.txt. Install with o2a2o update (allow_prerelease: true) or download an installer below." \
+            --generate-notes false \
+            artifacts/installers/* artifacts/o2a2o-* RELEASE-CHECKSUMS.txt
