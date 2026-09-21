@@ -4,6 +4,16 @@ import type { AppConfig } from "../../src/config/loader";
 
 let anthropicUp: ReturnType<typeof Bun.serve>; let openaiUp: ReturnType<typeof Bun.serve>; let gw: ReturnType<typeof Bun.serve>;
 
+// File-level so the auth-bearing gateway variant (S11) can derive from it.
+const cfgBase: AppConfig = {
+  server: { port: 0, host: "127.0.0.1", log_level: "info" },
+  models: [
+    { name: "gpt-4o", provider: "openai", api_keys: [{ key: "sk-oai", priority: 1 }] },
+    { name: "claude-sonnet-4-5", provider: "anthropic", api_keys: [{ key: "sk-ant", priority: 1 }] },
+  ],
+  aliases: { sonnet: "claude-sonnet-4-5" }, api_keys: {},
+};
+
 beforeAll(() => {
   anthropicUp = Bun.serve({
     port: 0, hostname: "127.0.0.1",
@@ -33,15 +43,7 @@ beforeAll(() => {
   });
   process.env.O2A2O_UPSTREAM_ANTHROPIC = `http://127.0.0.1:${anthropicUp.port}`;
   process.env.O2A2O_UPSTREAM_OPENAI = `http://127.0.0.1:${openaiUp.port}`;
-  const cfg: AppConfig = {
-    server: { port: 0, host: "127.0.0.1", log_level: "info" },
-    models: [
-      { name: "gpt-4o", provider: "openai", api_keys: [{ key: "sk-oai", priority: 1 }] },
-      { name: "claude-sonnet-4-5", provider: "anthropic", api_keys: [{ key: "sk-ant", priority: 1 }] },
-    ],
-    aliases: { sonnet: "claude-sonnet-4-5" }, api_keys: {},
-  };
-  gw = startGateway(cfg);
+  gw = startGateway(cfgBase);
 });
 afterAll(() => { gw.stop(true); anthropicUp.stop(true); openaiUp.stop(true); });
 
@@ -109,4 +111,20 @@ test("unknown model -> 400 in client format", async () => {
   const res = await post("/v1/chat/completions", { model: "nope", messages: [] });
   expect(res.status).toBe(400);
   expect((await res.json() as any).error.message).toMatch(/nope/);
+});
+
+test("S10: /v1/models returns openai shape; anthropic shape with x-api-key header", async () => {
+  const a = await (await fetch(`http://127.0.0.1:${gw.port}/v1/models`)).json() as any;
+  expect(a.object).toBe("list");
+  const b = await (await fetch(`http://127.0.0.1:${gw.port}/v1/models`, { headers: { "x-api-key": "x" } })).json() as any;
+  expect(b.data[0].type).toBe("model");
+});
+test("S11: auth_token enforced", async () => {
+  // separate gateway instance with auth_token set
+  const authGw = startGateway({ ...cfgBase, server: { ...cfgBase.server, port: 0, auth_token: "sec" } });
+  const noAuth = await fetch(`http://127.0.0.1:${authGw.port}/v1/models`);
+  expect(noAuth.status).toBe(401);
+  const withAuth = await fetch(`http://127.0.0.1:${authGw.port}/v1/models`, { headers: { authorization: "Bearer sec" } });
+  expect(withAuth.status).toBe(200);
+  authGw.stop(true);
 });

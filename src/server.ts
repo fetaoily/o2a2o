@@ -5,6 +5,7 @@ import type { AppConfig } from "./config/loader";
 import type { InputFormat } from "./core/format-detector";
 import { detectFormat } from "./core/format-detector";
 import { handleGatewayRequest } from "./core/unified-converter";
+import { checkAuth, modelsBody } from "./core/models-endpoint";
 import { ParamError } from "./converters/chat";
 import { UpstreamError } from "./core/forwarder";
 import { toClientError } from "./converters/errors";
@@ -18,10 +19,12 @@ function detectFormatSafe(path: string, body: Record<string, unknown>): InputFor
   catch { return "openai_chat"; }
 }
 
-// Task 11 fills in the real model listing; interim placeholder returns 501.
-function modelsHandler(_cfg: AppConfig, _req: Request): Response {
-  return new Response(JSON.stringify({ error: { message: "not implemented", type: "api_error" } }), {
-    status: 501,
+// openai shape by default; anthropic shape when the request presents an
+// anthropic-style credential or version header.
+function modelsHandler(cfg: AppConfig, req: Request): Response {
+  const anthropicShape = req.headers.has("anthropic-version") || req.headers.has("x-api-key");
+  return new Response(JSON.stringify(modelsBody(cfg, anthropicShape)), {
+    status: 200,
     headers: { "content-type": "application/json" },
   });
 }
@@ -30,10 +33,18 @@ export function startGateway(cfg: AppConfig): ReturnType<typeof Bun.serve> {
   return Bun.serve({
     port: cfg.server.port, hostname: cfg.server.host,
     async fetch(req) {
+      // Auth gate runs before any route dispatch: the client format is not
+      // yet knowable, so the 401 always uses the openai error shape.
+      const headers = Object.fromEntries(req.headers.entries());
+      if (!checkAuth(cfg, headers)) {
+        return new Response(JSON.stringify({ error: { message: "invalid api key", type: "authentication_error" } }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        });
+      }
       const url = new URL(req.url);
       if (req.method === "POST" && GATEWAY_PATHS.includes(url.pathname)) {
         const body = await req.json().catch(() => ({})) as Record<string, unknown>;
-        const headers = Object.fromEntries(req.headers.entries());
         try {
           const out = await handleGatewayRequest(cfg, url.pathname, body, headers);
           const h: Record<string, string> = { "content-type": "application/json" };
