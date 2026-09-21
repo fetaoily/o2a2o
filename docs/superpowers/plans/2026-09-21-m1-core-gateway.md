@@ -1433,3 +1433,10 @@ git commit -m "docs: add readme with m1 scope and quickstart"
 - **Spec 覆盖（M1 范围）**：FR-1/3/4/5/6（Task 4-6 转换器）✓；FR-7 错误映射（Task 8）✓；FR-8 多模态（image part 映射在 Task 5，text 必须/图片尽力——openai 侧 `mapContentParts` 在 Task 4 实现图片 url/base64 双形态）✓；FR-9/10 参数策略（Task 4 + dropped 头 Task 10）✓；FR-11 models（Task 11）✓；3.2 路由/别名/直通（Task 10）✓；3.4 动态 Key（Task 9）✓；3.8 鉴权（Task 3 校验 + Task 11 执行）✓；§4 CLI（Task 12）✓；S1-S3/S9-S12（Task 10/11/13）✓。M2+ 项（FR-2 流式、3.5 多 Key、3.6 动态超时、3.9 更新）显式出范围。
 - **占位符扫描**：Task 4 chatToIr 代码块含两处行内注释标记实现意图（`/* mapped via disableParallelToolUse */`、`mapContentParts` 调用）——`mapContentParts` 需在实现时同文件补齐（openai content parts: `text/image_url`），属实现细节展开非 TBD；可接受。
 - **类型一致性**：`ConvResult`/`ParamError` 定义于 Task 4（chat.ts），Task 5/6/8/10 均从 `./chat` 导入复用 ✓；`InputFormat`（Task 7）被 Task 8/10 消费 ✓；`GatewayOutcome.droppedParams` 与 server 的 `x-o2a2o-dropped` 头衔接 ✓。
+
+## Final Review Corrections (2026-09-21)
+
+- FR-2's `x-o2a2o-output-format` header was omitted from Tasks 10/11: the Self-Review mislabeled FR-2 as streaming, but FR-2 is the response-format override.
+- Implemented in the final fix wave: `handleGatewayRequest` now reads and validates the header and renders the upstream response in the requested output format (raw only when it matches the native upstream shape, else upstream -> IR -> output-format converter).
+- `o2a2o convert` (REQUIREMENTS §4) remains unassigned in this plan — carry to M2 planning.
+
