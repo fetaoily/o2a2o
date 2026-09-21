@@ -45,15 +45,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Without merge-multiple each artifact lands in its own directory:
+      # artifacts/dist-<platform>/{o2a2o-*, checksums.txt, installers/*}.
+      # (merge-multiple would collapse the three per-platform checksums.txt
+      # files onto one path, silently losing two platforms' sums.)
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true
+      # One checksums.txt for the whole release: 5 binary lines + 9 installer
+      # lines. The asset MUST be named checksums.txt — the o2a2o updater
+      # hardcodes that name (src/update/github-releases.ts).
       - name: Merge checksums
         run: |
           cd artifacts
-          cat dist/checksums.txt dist/installers/checksums.txt > RELEASE-CHECKSUMS.txt 2>/dev/null || \
-            cat installers/checksums.txt > RELEASE-CHECKSUMS.txt
+          cat dist-*/checksums.txt dist-*/installers/checksums.txt > checksums.txt
+          wc -l checksums.txt
       - name: Create prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -61,6 +67,5 @@ jobs:
           gh release create "${{ github.ref_name }}" \
             --prerelease \
             --title "${{ github.ref_name }} (Release Candidate)" \
-            --notes "RC build for testing - not stable. Verify checksums in RELEASE-CHECKSUMS.txt. Install with o2a2o update (allow_prerelease: true) or download an installer below." \
-            --generate-notes false \
-            artifacts/installers/* artifacts/o2a2o-* RELEASE-CHECKSUMS.txt
+            --notes "RC build for testing - not stable. Verify the assets against checksums.txt (sha256, one line per asset; run sha256sum -c from inside the download directory). The built-in o2a2o update command can consume this release when allow_prerelease is true under update in the config." \
+            artifacts/dist-*/o2a2o-* artifacts/dist-*/installers/o2a2o_* artifacts/checksums.txt

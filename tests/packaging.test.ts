@@ -35,7 +35,12 @@ const nfpmAvailable = existsSync(nfpmTool);
 
 const isExec = (mode: number) => (mode & 0o111) !== 0;
 
-describe("installer asset set", () => {
+// CI runners check out the repo without a build; every test below asserts
+// real dist/ artifacts, so the whole file only runs where dist/installers
+// exists (produce it locally with `bun run build:all && bun run package:all`).
+const distPresent = existsSync(installers);
+
+describe.skipIf(!distPresent)("installer asset set", () => {
   test("dist/installers contains exactly the nine RC assets", () => {
     const files = readdirSync(installers).filter((f) => f !== "checksums.txt").sort();
     expect(files).toEqual([...EXPECTED_ASSETS].sort());
@@ -48,7 +53,7 @@ describe("installer asset set", () => {
   });
 });
 
-describe("windows zip", () => {
+describe.skipIf(!distPresent)("windows zip", () => {
   const zipPath = () => readFileSync(join(installers, `o2a2o_${v}_windows-x64.zip`));
 
   test("contains the binary, install.ps1 and README", () => {
@@ -73,7 +78,7 @@ describe("windows zip", () => {
   });
 });
 
-describe("linux deb/rpm", () => {
+describe.skipIf(!distPresent)("linux deb/rpm", () => {
   const packages = EXPECTED_ASSETS.filter((a) => a.endsWith(".deb") || a.endsWith(".rpm"));
 
   test.skipIf(!nfpmAvailable)("deb and rpm files exist with nonzero size", () => {
@@ -113,7 +118,7 @@ describe("linux deb/rpm", () => {
   });
 });
 
-describe("linux tarballs", () => {
+describe.skipIf(!distPresent)("linux tarballs", () => {
   // asset arch name (amd64) -> build-all.mjs binary name (x64)
   const DIST_BINARY = { amd64: "o2a2o-linux-x64", arm64: "o2a2o-linux-arm64" } as const;
   for (const arch of ["amd64", "arm64"] as const) {
@@ -137,7 +142,7 @@ describe("linux tarballs", () => {
   }
 });
 
-describe("macos tarballs", () => {
+describe.skipIf(!distPresent)("macos tarballs", () => {
   for (const arch of ["arm64", "x64"] as const) {
     test(`${arch}: contains binary + launchd plist`, () => {
       const gz = readFileSync(join(installers, `o2a2o_${v}_macos-${arch}.tar.gz`));
@@ -156,7 +161,7 @@ describe("macos tarballs", () => {
   }
 });
 
-describe("installer checksums", () => {
+describe.skipIf(!distPresent)("installer checksums", () => {
   test("dist/installers/checksums.txt lists every asset with its real sha256", () => {
     const text = readFileSync(join(installers, "checksums.txt"), "utf8");
     const lines = text.trimEnd().split("\n");
