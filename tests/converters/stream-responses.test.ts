@@ -14,6 +14,13 @@ test("parseResponsesEvent maps verified event names", () => {
     .toEqual([{ type: "end", stopReason: "length" }]);
   expect(parseResponsesEvent('{"type":"response.created","response":{}}')).toEqual([]);
 });
+test("response.incomplete reason content_filter maps to IR content_filter", () => {
+  expect(parseResponsesEvent('{"type":"response.incomplete","response":{"incomplete_details":{"reason":"content_filter"}}}'))
+    .toEqual([{ type: "end", stopReason: "content_filter" }]);
+  // an unrecognized reason keeps falling back to stop
+  expect(parseResponsesEvent('{"type":"response.incomplete","response":{"incomplete_details":{"reason":"other_new_reason"}}}'))
+    .toEqual([{ type: "end", stopReason: "stop" }]);
+});
 test("encoder emits minimal viable event set", () => {
   const e = new ResponsesStreamEncoder();
   const out = e.start() + e.push({ type: "text_delta", text: "Hi" })

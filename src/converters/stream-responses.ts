@@ -75,7 +75,7 @@ export class ResponsesSseParser {
         return [endEvent("stop", parsed.response)];
       case "response.incomplete": {
         const reason = parsed.response?.incomplete_details?.reason;
-        return [endEvent(reason === "max_output_tokens" ? "length" : "stop", parsed.response)];
+        return [endEvent(reason === "max_output_tokens" ? "length" : reason === "content_filter" ? "content_filter" : "stop", parsed.response)];
       }
       case "response.failed":
         return [endEvent("content_filter", parsed.response)];

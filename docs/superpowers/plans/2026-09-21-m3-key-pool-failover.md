@@ -188,3 +188,12 @@ export async function forwardWithFailover(opts: {
 - **占位符扫描**：Task 2 测试"约 12 例"给出逐分量清单而非逐行代码——与 M1/M2 计划同颗粒度（测试意图 + 判别标准完整，公式与状态机在 Global Constraints 中逐字给出）；Task 3 registry 挂载方式留实现选择（报告说明）——两者均为受控展开非 TBD。
 - **类型一致性**：`KeyDecision.keyId` 与端点 `:keyId` 参数一致（掩码即 ID）✓；`resolveFailoverConfig` 模式复刻 `resolveTimeoutConfig` ✓；`forwardWithFailover` 返回 `{response, keyId, fallback}` 供 unified-converter 记账与日志 ✓；FailoverConfig 数值与 §6.1 模板注释一致（recovery_successes 3 为 §7.1 恢复计数的落地字段）✓。
 - **裁定**：keyId = 掩码（URL 安全且不泄漏明文；碰撞即配置错误，构造抛错）；流式重试期间零字节下发（首包前无部分结果）；池按模型分实例（M2 F1 教训：绝无跨流共享可变状态——池本身是共享可变状态，但其方法为同步临界区，事件循环内无 await 穿越状态变更，无需锁）。
+
+## Final Review Corrections (recorded post-execution)
+
+- Registry mounting (Task 3 left the choice to the report): `KeyPoolRegistry.from(cfg)` caches one registry per `AppConfig` object in a module-level `WeakMap` (`src/core/forwarder.ts`) — pool state persists across requests for a served config, while tests' distinct cfg objects stay isolated and a config reload starts fresh pools.
+- Dynamic-key / pool interaction (silent in the plan, per TECH-DESIGN §7.3 "不入池"): a request carrying a dynamic key (`x-o2a2o-*` header / `o2a2o_keys` body field) makes a single attempt with no `select`/`recordSuccess`/`recordFailure` accounting, in both the non-stream and stream paths (`src/core/unified-converter.ts`).
+- Stream exhaustion rendering narrowed (refines Task 4's "重试耗尽 → 目标格式 error 帧"): only a `first_packet` timeout renders the in-band error frame + close; headers-phase failures and non-retryable errors keep the M2 throw-into-error-path semantics and render as JSON errors (zero client bytes either way). Recorded in TECH-DESIGN §20.
+- `GET /health/keys` exposes `totalFailures` per key beyond the field list in Task 5's interface block (`status`, `consecutiveFailures`, `avgLatency`, `cooldownRemaining`) — additive, same masked-keyId shape.
+- Scoring constants needed no tuning: implementation matches the Global Constraints formula verbatim (healthy +1000 / degraded +500, latency penalty `min(avgLatency/10, 500)`, failure penalty 100, rotation +50 after 60s).
+- Carry-over (c) from Global Constraints was already satisfied by Task 4: stream first-packet latency feeds `pool.recordSuccess` on the winning key, covered by the failover integration test (`tests/integration/gateway.test.ts` asserts the recorded latency sample); Task 6 added nothing for it.

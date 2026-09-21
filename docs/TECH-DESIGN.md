@@ -521,3 +521,12 @@ bun run release --version 1.0.0 # tag + GitHub Release + assets + checksums
 - **§8.2 空闲检测量化补偿**：空闲判定阈值为 `idle + grace + idle_check_interval`（采样间隔盲区补偿；Windows 定时器量化下朴素判定不稳定，实证 6/25 抖动）；默认配置下空闲中止约 70-80s。
 - **§16** `parallel_tool_calls: true` 的丢弃记录与 `x-o2a2o-dropped` 头在流式路径同样生效；`responsesResponseToIr` 上游 `arguments` 解析失败已降级为 `input:{}` + warn（当前行为）。
 - **§8** 首包计时自上游响应头到达后启动，头阶段由非流式超时约束。
+
+## 20. M3 实现勘误（2026-09-22）
+
+以实现与测试为准，对正文四处修正：
+
+- **§9 故障转移流程（记账门控）**：流程句「失败则 `recordFailure`」读作任何失败都记账；实现为仅 **Key 级错误**（网络错误、超时、5xx、429、401/403，判定表 ✅ 行）累计 `recordFailure`，400/422 等请求级错误不记账、不降级 Key，直接返回客户端（非流式与流式首包窗口一致）。
+- **§10 流式响应头时机**：SSE 响应头延迟到胜出 Key 的**首个上游字节**到达后才下发；headers 阶段（连接失败/非 2xx）的错误仍走 JSON 错误响应（M1 错误路径），不产生半开 SSE——重试窗口内对客户端零字节下发。
+- **§8.2 空闲阈值**：无 §19 之外的补充（实现即 §19 修正后的 `idle + grace + idle_check_interval`）。
+- **§7.3 keyId 与 reset 语义**：keyId = 掩码键（`maskKey(key)`），端点 URL 与记账均用掩码，明文 Key 不出池；`/admin/keys/:keyId/reset` 按模型配置顺序取**第一个**拥有该 keyId 的池（首匹配，未命中 404）；reset 归 healthy、清连败与冷却，保留延迟历史与累计失败数——reset 非 opt-out，Key 持续失败仍会在再满 `failure_threshold` 次后重新进入冷却。
