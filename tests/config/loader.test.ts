@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { loadConfig } from "../../src/config/loader";
+import { loadConfig, ConfigError, resolveTimeoutConfig } from "../../src/config/loader";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,4 +44,38 @@ test("undefined env var fails with field path", async () => {
 
 test("missing file fails clearly", async () => {
   await expect(loadConfig(join(dir, "nope.yaml"))).rejects.toThrow(/config file not found/i);
+});
+
+test("timeout section loads with defaults when absent", async () => {
+  const p = join(dir, "t1.yaml");
+  writeFileSync(p, 'server: { port: 1, host: "127.0.0.1" }\nmodels: [{ name: "m", provider: "openai", api_keys: [{ key: "k", priority: 1 }] }]\n');
+  const cfg = await loadConfig(p);
+  const t = resolveTimeoutConfig(cfg);
+  expect(t.non_stream.default).toBe(60000);
+  expect(t.stream.first_packet).toBe(30000);
+  expect(t.stream.total_max).toBe(600000);
+});
+
+test("timeout section loads explicit values", async () => {
+  const p = join(dir, "t2.yaml");
+  writeFileSync(p, 'timeout:\n  stream:\n    first_packet: 5000\n');
+  const cfg = await loadConfig(p);
+  expect(resolveTimeoutConfig(cfg).stream.first_packet).toBe(5000);
+});
+
+test("empty yaml file -> ConfigError, not TypeError", async () => {
+  const p = join(dir, "t3.yaml");
+  writeFileSync(p, "");
+  await expect(loadConfig(p)).rejects.toThrow(ConfigError);
+});
+
+test("yaml syntax error -> ConfigError wrapping cause", async () => {
+  const p = join(dir, "t4.yaml");
+  writeFileSync(p, "models: [\n  broken");
+  await expect(loadConfig(p)).rejects.toThrow(ConfigError);
+});
+
+test("unreadable file (bad path type) -> clear error, not 'not found'", async () => {
+  // directory instead of file exercises the non-ENOENT read failure path
+  await expect(loadConfig(dir)).rejects.toThrow(/cannot read config file/i);
 });

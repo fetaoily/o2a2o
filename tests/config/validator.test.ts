@@ -42,3 +42,12 @@ test("template is valid yaml", async () => {
   const { parse } = await import("yaml");
   expect(() => parse(CONFIG_TEMPLATE)).not.toThrow();
 });
+
+test("negative timeout values rejected", () => {
+  const c = base(); (c as any).timeout = { stream: { first_packet: -1 } };
+  expect(validateConfig(c)[0]).toMatch(/timeout/);
+});
+test("non_stream min > max rejected", () => {
+  const c = base(); (c as any).timeout = { non_stream: { by_request: { min: 100, max: 50 } } };
+  expect(validateConfig(c)[0]).toMatch(/min.*max|max.*min/);
+});

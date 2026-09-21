@@ -29,14 +29,16 @@ api_keys:
   openai: "\${OPENAI_API_KEY}"
   anthropic: "\${ANTHROPIC_API_KEY}"
 
-failover:
-  max_retries: 3            # attempts across keys per request
-  failure_threshold: 3      # consecutive failures -> cooldown
-  cooldown_ms: 300000       # 5 min
-  latency_window: 10        # rolling latency samples per key
-  recovery:
-    strategy: "gradual"     # gradual | immediate
+# Failover (implemented in M3):
+# failover:
+#   max_retries: 3            # attempts across keys per request
+#   failure_threshold: 3      # consecutive failures -> cooldown
+#   cooldown_ms: 300000       # 5 min
+#   latency_window: 10        # rolling latency samples per key
+#   recovery:
+#     strategy: "gradual"     # gradual | immediate
 
+# Request timeouts in milliseconds
 timeout:
   non_stream:
     default: 60000
@@ -53,8 +55,9 @@ timeout:
     idle_grace_period: 5000
     total_max: 600000
 
-update:
-  enabled: true
-  repo: "fetaoily/o2a2o"      # GitHub repo serving Releases
-  check_on_start: true
+# Self-update (implemented in M4):
+# update:
+#   enabled: true
+#   repo: "fetaoily/o2a2o"      # GitHub repo serving Releases
+#   check_on_start: true
 `;
