@@ -54,12 +54,13 @@ export function convertStream(opts: {
   source: ReadableStream<Uint8Array>;
   monitor: StreamTimeoutManager;
   usageSink?: (u: TokenUsage) => void;
-  // Envelope metadata for a chat-format destination: the gateway supplies the
-  // request id and the resolved model name so converted chunks carry them
-  // instead of the encoder's synthesized defaults.
-  chatMeta?: { id?: string; model?: string };
+  // Envelope metadata for whichever destination encoder is chosen: the
+  // gateway supplies the format-prefixed request id and the resolved model
+  // name so converted frames carry them instead of the encoders'
+  // synthesized defaults. All three encoders take the same shape.
+  meta?: { id?: string; model?: string };
 }): ReadableStream<Uint8Array> {
-  const { srcFormat, dstFormat, source, monitor, usageSink, chatMeta } = opts;
+  const { srcFormat, dstFormat, source, monitor, usageSink, meta } = opts;
   const reader = source.getReader();
   const decoder = new TextDecoder();
   const sse = new SseLineReader();
@@ -88,14 +89,14 @@ export function convertStream(opts: {
   let stopReason: EndEvent["stopReason"] = "stop";
   const adapter = (() => {
     if (dstFormat === "anthropic") {
-      const enc = new AnthropicStreamEncoder();
+      const enc = new AnthropicStreamEncoder(meta);
       return { begin: () => enc.start(), push: (ev: StreamEvent) => enc.push(ev), finish: () => enc.finish() };
     }
     if (dstFormat === "openai_responses") {
-      const enc = new ResponsesStreamEncoder();
+      const enc = new ResponsesStreamEncoder(meta);
       return { begin: () => enc.start(), push: (ev: StreamEvent) => enc.push(ev), finish: () => enc.finish(stopReason, usage) };
     }
-    const enc = new ChatStreamEncoder(chatMeta);
+    const enc = new ChatStreamEncoder(meta);
     return { begin: () => "", push: (ev: StreamEvent) => enc.push(ev), finish: () => enc.finish(usage) };
   })();
 

@@ -233,6 +233,14 @@ function withTimeoutGuard(
   });
 }
 
+// Envelope metadata for a converted stream: the resolved model name plus a
+// destination-format-prefixed request id, so converted frames carry real
+// values instead of the encoders' synthesized defaults.
+function streamMeta(outFormat: InputFormat, model: string): { id: string; model: string } {
+  const prefix = outFormat === "anthropic" ? "msg_" : outFormat === "openai_responses" ? "resp_" : "chatcmpl-";
+  return { id: prefix + crypto.randomUUID(), model };
+}
+
 // Streaming main path (M2): the same first half as the non-stream path, then
 // the upstream is called with stream:true and Accept SSE. Its byte stream is
 // piped through verbatim when source and output formats match, otherwise
@@ -268,7 +276,7 @@ export async function handleGatewayStream(
         dstFormat: outFormat,
         source,
         monitor,
-        chatMeta: { id: `chatcmpl-${crypto.randomUUID()}`, model: model.name },
+        meta: streamMeta(outFormat, model.name),
       });
   return {
     status: 200,
