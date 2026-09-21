@@ -1440,3 +1440,13 @@ git commit -m "docs: add readme with m1 scope and quickstart"
 - Implemented in the final fix wave: `handleGatewayRequest` now reads and validates the header and renders the upstream response in the requested output format (raw only when it matches the native upstream shape, else upstream -> IR -> output-format converter).
 - `o2a2o convert` (REQUIREMENTS §4) remains unassigned in this plan — carry to M2 planning.
 
+## M2 Carry-Forward Backlog (from final review + task-review ledger, 2026-09-21)
+
+Deferred by controller ruling — none block M1 merge; triage during M2 planning:
+
+- Correctness follow-ups: `responsesResponseToIr` upstream `arguments` parse unguarded (malformed upstream → 500, responses.ts ~175); non-`true` stream values (`stream: 1` / `"true"`) bypass the M1 400 guard; anthropic-side URL-source images warn+skip, openai remote-URL image → anthropic renders `{source:{type:"base64",media_type:"url"}}` sentinel; `chatToIr` bare TypeError on tool_call missing `function`.
+- Hardening: empty-string dynamic key wins resolveKey chain (`""` should fall through); `maskKey` reveals keys ≤ 12 chars; loader bare-catch maps EACCES→"not found", empty-YAML → TypeError, YAML syntax errors unwrapped, defaults-branch untested; 403 not classified as authentication; CLI invalid `--port` silently dropped, `--port 0` prints `:0`; config init template ships dead M2+ sections (`failover`/`timeout`/`update`) — comment out or feature-gate.
+- Fidelity edges: cache_control on anthropic system blocks stripped but unrecorded in dropped; disableParallelToolUse lossy for forced tool_choice; `instructions` + system items both present → instructions dropped unrecorded; unknown `reasoning_effort` values dropped without warn/dropped entry; near-duplicate error-type mapping helpers.
+- Test hygiene: restore `O2A2O_UPSTREAM_*` in afterAll; `authGw.stop` in try/finally; pin secondary `/v1/models` fields; reverse-direction 401 test; global-fallback + openai Bearer header assertions; forwarder env cleanup exception-safety.
+- Features: `o2a2o convert` CLI command (unassigned); anthropic `/v1/models` `capabilities` field; DC-4 "attach gateway note" on structured-output upstream 400s; wire `server.log_level` through `setLogLevel` (currently dead; converters use raw console.*).
+
