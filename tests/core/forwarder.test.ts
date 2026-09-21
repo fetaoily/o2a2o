@@ -1,4 +1,4 @@
-import { test, expect, mock, beforeEach } from "bun:test";
+import { test, expect, mock, beforeEach, afterEach } from "bun:test";
 import { resolveKey, forwardToUpstream, UpstreamError } from "../../src/core/forwarder";
 import type { AppConfig } from "../../src/config/loader";
 
@@ -26,6 +26,10 @@ test("no key anywhere throws", () => {
 });
 
 beforeEach(() => { mock.restore(); });
+// global.fetch is assigned directly below; mock.restore() does not undo direct
+// assignments, so restore it explicitly to keep the leak out of later test files.
+const realFetch = global.fetch;
+afterEach(() => { global.fetch = realFetch; });
 test("forwardToUpstream sends provider-correct headers; non-2xx throws UpstreamError", async () => {
   const fetchMock = mock(async (url: any, init: any) => {
     if (String(url).includes("anthropic")) {
