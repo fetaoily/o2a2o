@@ -36,6 +36,11 @@ test("maxTokens defaults to 4096 when absent", () => {
   expect(ir.maxTokens).toBe(4096);
 });
 
+test("bare string stop is normalized to array", () => {
+  const { ir } = chatToIr({ model: "m", messages: [{ role: "user", content: "x" }], stop: "END" });
+  expect(ir.stop).toEqual(["END"]);
+});
+
 test("n > 1 throws ParamError", () => {
   expect(() => chatToIr({ ...chatReq, n: 3 })).toThrow(ParamError);
 });
