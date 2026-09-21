@@ -22,12 +22,20 @@ export interface TimeoutConfig {
     total_max: number;
   };
 }
+export interface FailoverConfig {
+  max_retries: number;
+  failure_threshold: number;
+  cooldown_ms: number;
+  latency_window: number;
+  recovery_successes: number;
+}
 export interface AppConfig {
   server: ServerConfig;
   models: ModelConfig[];
   aliases: Record<string, string>;
   api_keys: { openai?: string; anthropic?: string };
   timeout?: TimeoutConfig;
+  failover?: FailoverConfig;
 }
 
 const ENV_REF = /^\$\{(.+)\}$/;
@@ -99,4 +107,16 @@ export function resolveTimeoutConfig(cfg: AppConfig): TimeoutConfig {
     },
     stream: { ...TIMEOUT_DEFAULTS.stream, ...st },
   };
+}
+
+const FAILOVER_DEFAULTS: FailoverConfig = {
+  max_retries: 3,
+  failure_threshold: 3,
+  cooldown_ms: 300000,
+  latency_window: 10,
+  recovery_successes: 3,
+};
+
+export function resolveFailoverConfig(cfg: AppConfig): FailoverConfig {
+  return { ...FAILOVER_DEFAULTS, ...(cfg.failover ?? {}) };
 }

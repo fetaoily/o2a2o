@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { loadConfig, ConfigError, resolveTimeoutConfig } from "../../src/config/loader";
+import { loadConfig, ConfigError, resolveTimeoutConfig, resolveFailoverConfig } from "../../src/config/loader";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -78,4 +78,27 @@ test("yaml syntax error -> ConfigError wrapping cause", async () => {
 test("unreadable file (bad path type) -> clear error, not 'not found'", async () => {
   // directory instead of file exercises the non-ENOENT read failure path
   await expect(loadConfig(dir)).rejects.toThrow(/cannot read config file/i);
+});
+
+test("failover section loads with defaults when absent", async () => {
+  const p = join(dir, "f1.yaml");
+  writeFileSync(p, 'server: { port: 1, host: "127.0.0.1" }\nmodels: [{ name: "m", provider: "openai", api_keys: [{ key: "k", priority: 1 }] }]\n');
+  const cfg = await loadConfig(p);
+  expect(resolveFailoverConfig(cfg)).toEqual({
+    max_retries: 3,
+    failure_threshold: 3,
+    cooldown_ms: 300000,
+    latency_window: 10,
+    recovery_successes: 3,
+  });
+});
+
+test("failover section loads explicit values over defaults", async () => {
+  const p = join(dir, "f2.yaml");
+  writeFileSync(p, 'failover:\n  max_retries: 5\n  cooldown_ms: 60000\n');
+  const cfg = await loadConfig(p);
+  const f = resolveFailoverConfig(cfg);
+  expect(f.max_retries).toBe(5);
+  expect(f.cooldown_ms).toBe(60000);
+  expect(f.failure_threshold).toBe(3);
 });

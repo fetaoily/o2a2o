@@ -29,14 +29,13 @@ api_keys:
   openai: "\${OPENAI_API_KEY}"
   anthropic: "\${ANTHROPIC_API_KEY}"
 
-# Failover (implemented in M3):
-# failover:
-#   max_retries: 3            # attempts across keys per request
-#   failure_threshold: 3      # consecutive failures -> cooldown
-#   cooldown_ms: 300000       # 5 min
-#   latency_window: 10        # rolling latency samples per key
-#   recovery:
-#     strategy: "gradual"     # gradual | immediate
+# Failover across api keys.
+failover:
+  max_retries: 3            # attempts across keys per request
+  failure_threshold: 3      # consecutive failures -> cooldown
+  cooldown_ms: 300000       # 5 min
+  latency_window: 10        # rolling latency samples per key
+  recovery_successes: 3     # consecutive successes to leave cooldown
 
 # Request timeouts in milliseconds
 timeout:

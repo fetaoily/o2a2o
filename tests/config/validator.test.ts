@@ -51,3 +51,11 @@ test("non_stream min > max rejected", () => {
   const c = base(); (c as any).timeout = { non_stream: { by_request: { min: 100, max: 50 } } };
   expect(validateConfig(c)[0]).toMatch(/min.*max|max.*min/);
 });
+test("array-shaped timeout leaf rejected", () => {
+  const c = base(); (c as any).timeout = { stream: { first_packet: [5000] } };
+  expect(validateConfig(c)[0]).toMatch(/must be a positive number/);
+});
+test("non-number timeout leaf rejected", () => {
+  const c = base(); (c as any).timeout = { stream: { first_packet: "5000" } };
+  expect(validateConfig(c)[0]).toMatch(/must be a positive number/);
+});
