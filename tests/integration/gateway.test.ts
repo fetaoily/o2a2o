@@ -43,6 +43,10 @@ const anthropicSseFixture =
   'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n' +
   'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}\n\n' +
   'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+const responsesSseFixture =
+  'data: {"type":"response.created","response":{"id":"resp_s","object":"response","created_at":1,"model":"gpt-4o","status":"in_progress"}}\n\n' +
+  'data: {"type":"response.output_text.delta","item_id":"msg_s","output_index":0,"content_index":0,"delta":"stream-hello"}\n\n' +
+  'data: {"type":"response.completed","response":{"id":"resp_s","object":"response","created_at":1,"model":"gpt-4o","status":"completed","output":[{"id":"msg_s","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"stream-hello","annotations":[]}]}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}\n\n';
 
 beforeAll(() => {
   anthropicUp = Bun.serve({
@@ -67,6 +71,8 @@ beforeAll(() => {
       const body = await req.json() as any;
       openaiSeen = body;
       if (body.stream === true) {
+        if (new URL(req.url).pathname === "/v1/responses")
+          return new Response(responsesSseFixture, { headers: { "content-type": "text/event-stream" } });
         const content = body.messages?.[0]?.content;
         if (content === "err") return new Response(openaiErrFixture, { headers: { "content-type": "text/event-stream" } });
         if (content === "heartbeat") return new Response(": heartbeat\n\n", { headers: { "content-type": "text/event-stream" } });
@@ -220,6 +226,24 @@ test("passthrough stream: openai_chat -> openai model pipes bytes verbatim", asy
   const res = await post("/v1/chat/completions", { model: "gpt-4o", messages: [{ role: "user", content: "hi" }], stream: true });
   const text = await res.text();
   expect(text).toBe(openaiSseFixture);
+});
+
+test("passthrough stream: anthropic -> anthropic model pipes bytes verbatim", async () => {
+  const res = await post("/v1/messages", { model: "claude-sonnet-4-5", max_tokens: 99, messages: [{ role: "user", content: "hi" }], stream: true },
+    { "x-api-key": "placeholder", "anthropic-version": "2023-06-01" });
+  expect(res.headers.get("content-type")).toBe("text/event-stream");
+  const text = await res.text();
+  expect(text).toBe(anthropicSseFixture);                       // byte-identical
+  expect(text.trimEnd().endsWith('data: {"type":"message_stop"}')).toBe(true);
+});
+
+test("passthrough stream: openai_responses -> openai model pipes bytes verbatim", async () => {
+  const res = await post("/v1/responses", { model: "gpt-4o", input: "hi", stream: true });
+  expect(res.headers.get("content-type")).toBe("text/event-stream");
+  const text = await res.text();
+  expect(text).toBe(responsesSseFixture);                       // byte-identical
+  const lastLine = text.trimEnd().split("\n").at(-1) ?? "";
+  expect(lastLine.startsWith('data: {"type":"response.completed"')).toBe(true);
 });
 
 test("stream truthiness: stream:'true' selects the streaming path", async () => {
