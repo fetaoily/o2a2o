@@ -182,6 +182,8 @@ interface RawTarEntry {
   size: number;
   mode: number;
   type: string;
+  /** View into the decompressed tar buffer (regular-file entries only). */
+  data: Buffer;
 }
 
 function readTarBlocks(tar: Buffer): RawTarEntry[] {
@@ -197,13 +199,13 @@ function readTarBlocks(tar: Buffer): RawTarEntry[] {
     const size = parseInt(tarString(block, 124, 12).replace(/[^0-7]/g, ""), 8) || 0;
     const mode = parseInt(tarString(block, 100, 8).replace(/[^0-7]/g, ""), 8) || 0;
     const type = String.fromCharCode(block[156] === 0 ? 0x30 : block[156]);
+    const data = tar.subarray(off + 512, off + 512 + size);
     off += 512;
     if (type === "x" || type === "g") {
       // pax extended header: applies the "path" override to the next entry
-      const data = tar.subarray(off, off + size);
       if (type === "x") paxPath = parsePaxPath(data) ?? paxPath;
     } else if (type === "0" || type === "\0") {
-      out.push({ name: paxPath ?? name, size, mode, type });
+      out.push({ name: paxPath ?? name, size, mode, type, data });
       paxPath = null;
     }
     off += Math.ceil(size / 512) * 512;
@@ -214,6 +216,13 @@ function readTarBlocks(tar: Buffer): RawTarEntry[] {
 /** List the members of a .tar.gz archive. */
 export function readTarGzEntries(gz: Buffer): ArchiveEntryInfo[] {
   return readTarBlocks(gunzipSync(gz)).map(({ name, size, mode }) => ({ name, size, mode }));
+}
+
+/** Extract one member's content from a .tar.gz archive. */
+export function extractTarGzEntry(gz: Buffer, name: string): Buffer {
+  const hit = readTarBlocks(gunzipSync(gz)).find((e) => e.name === name);
+  if (!hit) throw new Error(`tar: member not found: ${name}`);
+  return hit.data;
 }
 
 function tarBlock(name: string, data: Buffer, mode: number): Buffer[] {
