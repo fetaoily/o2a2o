@@ -40,6 +40,48 @@ export interface ChatRequest {
   [key: string]: unknown;
 }
 
+// Loose annotations of the openai_responses wire shapes. Internal use only;
+// intentionally not exhaustive — unknown fields pass through index signatures.
+
+export interface ResponsesRequest {
+  model?: string;
+  instructions?: string;
+  input?: unknown;
+  tools?: { type?: string; name?: string; description?: string; parameters?: unknown }[];
+  tool_choice?: unknown;
+  temperature?: number;
+  top_p?: number;
+  max_output_tokens?: number;
+  stream?: boolean;
+  reasoning?: { effort?: string };
+  text?: { format?: { type?: string; json_schema?: { name?: string; schema?: unknown } } };
+  [key: string]: unknown;
+}
+
+export interface ResponsesOutputItem {
+  id?: string;
+  type?: string;
+  role?: string;
+  status?: string;
+  content?: { type?: string; text?: string }[];
+  call_id?: string;
+  name?: string;
+  arguments?: string;
+}
+
+export interface ResponsesResponse {
+  id?: string;
+  object?: string;
+  created_at?: number;
+  status?: string;
+  model?: string;
+  incomplete_details?: { reason?: string };
+  error?: { message?: string };
+  output?: ResponsesOutputItem[];
+  usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+  [key: string]: unknown;
+}
+
 export interface ChatResponse {
   id?: string;
   object?: string;
