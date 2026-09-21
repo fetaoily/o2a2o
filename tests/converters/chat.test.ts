@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
-import { chatToIr, irToChat, chatResponseToIr, irToChatResponse, ParamError } from "../../src/converters/chat";
+import { chatToIr, irToChat, chatResponseToIr, irToChatResponse, toolResultToString, ParamError } from "../../src/converters/chat";
+import type { IRRequest } from "../../src/types/ir";
 
 const chatReq = {
   model: "claude-sonnet-4-5",
@@ -41,6 +42,33 @@ test("bare string stop is normalized to array", () => {
   expect(ir.stop).toEqual(["END"]);
 });
 
+test("null stop stays undefined", () => {
+  const { ir } = chatToIr({ model: "m", messages: [{ role: "user", content: "x" }], stop: null });
+  expect(ir.stop).toBeUndefined();
+});
+
+test("stream:true throws ParamError mentioning streaming", () => {
+  expect(() => chatToIr({ model: "m", messages: [{ role: "user", content: "x" }], stream: true })).toThrow(ParamError);
+  expect(() => chatToIr({ model: "m", messages: [{ role: "user", content: "x" }], stream: true })).toThrow(/streaming/);
+});
+
+test("malformed tool call arguments throw ParamError naming the tool", () => {
+  expect(() => chatToIr({ model: "m", messages: [
+    { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: "{bad" } }] },
+  ] })).toThrow(ParamError);
+  expect(() => chatToIr({ model: "m", messages: [
+    { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: "{bad" } }] },
+  ] })).toThrow(/malformed tool call arguments for get_weather/);
+});
+
+test("upstream malformed tool args degrade to empty input, not a throw", () => {
+  const ir = chatResponseToIr({ id: "r", model: "m", choices: [{ index: 0,
+    message: { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: "{bad" } }] },
+    finish_reason: "tool_calls" }] });
+  expect((ir.content[0] as any).input).toEqual({});
+  expect((ir.content[0] as any).name).toBe("f");
+});
+
 test("n > 1 throws ParamError", () => {
   expect(() => chatToIr({ ...chatReq, n: 3 })).toThrow(ParamError);
 });
@@ -79,4 +107,42 @@ test("response mapping round trip", () => {
   expect(back.choices[0].message.tool_calls[0].id).toBe("c1");
   expect(back.choices[0].finish_reason).toBe("tool_calls");
   expect(back.usage.total_tokens).toBe(15);
+});
+
+const irWithImages: IRRequest = {
+  model: "m", messages: [{ role: "user", content: [
+    { type: "text", text: "look" },
+    { type: "image", mediaType: "image/png", data: "QUJD" },
+    { type: "image", mediaType: "url", data: "https://example.com/x.png" },
+  ] }], maxTokens: 10, stream: false,
+};
+
+test("irToChat serializes image parts to image_url (data: for base64, raw for url)", () => {
+  const out = irToChat(irWithImages) as any;
+  expect(out.messages[0].content).toEqual([
+    { type: "text", text: "look" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } },
+    { type: "image_url", image_url: { url: "https://example.com/x.png" } },
+  ]);
+});
+
+test("toolResultToString flattens anthropic-style content blocks", () => {
+  expect(toolResultToString("ok")).toBe("ok");
+  expect(toolResultToString([{ type: "text", text: "ok" }])).toBe("ok");
+  expect(toolResultToString([
+    { type: "image", source: { type: "base64" } },
+    { type: "text", text: "a" },
+    { type: "text", text: "b" },
+  ])).toBe("ab");
+  expect(toolResultToString(42)).toBe("42");
+});
+
+test("irToChat stringifies tool_result array content instead of [object Object]", () => {
+  const ir: IRRequest = { model: "m", messages: [
+    { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "f", input: {} }] },
+    { role: "tool", content: [{ type: "tool_result", toolUseId: "c1", content: [{ type: "text", text: "ok" }] }] },
+  ], maxTokens: 10, stream: false };
+  const out = irToChat(ir) as any;
+  expect(out.messages[1].content).toBe("ok");
+  expect(out.messages[1].tool_call_id).toBe("c1");
 });

@@ -1,5 +1,7 @@
 import { test, expect } from "bun:test";
 import { responsesToIr, irToResponses, responsesResponseToIr, irToResponsesResponse } from "../../src/converters/responses";
+import { ParamError } from "../../src/converters/chat";
+import type { IRRequest } from "../../src/types/ir";
 
 const respReq = {
   model: "claude-sonnet-4-5",
@@ -73,4 +75,29 @@ test("failed response merges error message into content", () => {
   const ir = responsesResponseToIr(res);
   expect(ir.stopReason).toBe("content_filter");
   expect(ir.content).toContainEqual({ type: "text", text: "The model failed to generate a response." });
+});
+
+test("stream:true throws ParamError mentioning streaming", () => {
+  expect(() => responsesToIr({ model: "m", input: "x", stream: true })).toThrow(ParamError);
+  expect(() => responsesToIr({ model: "m", input: "x", stream: true })).toThrow(/streaming/);
+});
+
+test("malformed function_call arguments throw ParamError naming the tool", () => {
+  const body = { model: "m", input: [{ type: "function_call", call_id: "c1", name: "f", arguments: "{bad" }] };
+  expect(() => responsesToIr(body)).toThrow(ParamError);
+  expect(() => responsesToIr(body)).toThrow(/malformed tool call arguments for f/);
+});
+
+test("image parts serialize to input_image in message items", () => {
+  const ir: IRRequest = { model: "m", messages: [{ role: "user", content: [
+    { type: "text", text: "look" },
+    { type: "image", mediaType: "image/png", data: "QUJD" },
+    { type: "image", mediaType: "url", data: "https://example.com/x.png" },
+  ] }], maxTokens: 10, stream: false };
+  const out = irToResponses(ir) as any;
+  expect(out.input[0].content).toEqual([
+    { type: "input_text", text: "look" },
+    { type: "input_image", image_url: "data:image/png;base64,QUJD" },
+    { type: "input_image", image_url: "https://example.com/x.png" },
+  ]);
 });

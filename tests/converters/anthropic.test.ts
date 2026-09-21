@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import { anthropicToIr, irToAnthropic, anthropicResponseToIr, irToAnthropicResponse } from "../../src/converters/anthropic";
+import { ParamError } from "../../src/converters/chat";
 
 const antReq = {
   model: "gpt-4o", max_tokens: 512, system: "be brief",
@@ -52,4 +53,10 @@ test("response mapping incl refusal -> content_filter and pause_turn -> stop", (
   expect(back.type).toBe("message");
   expect(back.stop_reason).toBe("refusal");
   expect(back.usage).toEqual({ input_tokens: 3, output_tokens: 2 });
+});
+
+test("stream:true throws ParamError mentioning streaming", () => {
+  const body = { model: "m", max_tokens: 10, messages: [{ role: "user", content: "x" }], stream: true };
+  expect(() => anthropicToIr(body)).toThrow(ParamError);
+  expect(() => anthropicToIr(body)).toThrow(/streaming/);
 });

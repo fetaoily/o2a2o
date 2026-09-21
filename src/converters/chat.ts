@@ -59,6 +59,8 @@ function normalizeToolChoice(tc: unknown): IRRequest["toolChoice"] {
 
 export function chatToIr(body: unknown): ConvResult {
   const b = body as any;
+  if (b.stream === true)
+    throw new ParamError("streaming is not supported in this gateway version (planned for M2)");
   if (b.n !== undefined && b.n > 1)
     throw new ParamError("`n` must be 1: target provider does not support multiple choices");
   const rf = b.response_format;
@@ -76,8 +78,13 @@ export function chatToIr(body: unknown): ConvResult {
     if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
       const parts: IRContentPart[] = [];
       if (m.content) parts.push({ type: "text", text: String(m.content) });
-      for (const c of m.tool_calls)
-        parts.push({ type: "tool_use", id: c.id, name: c.function.name, input: JSON.parse(c.function.arguments || "{}") });
+      for (const c of m.tool_calls) {
+        const raw = c.function?.arguments;
+        let input: unknown;
+        try { input = JSON.parse(raw || "{}"); }
+        catch { throw new ParamError(`malformed tool call arguments for ${String(c.function?.name)}: not valid JSON`); }
+        parts.push({ type: "tool_use", id: c.id, name: c.function.name, input });
+      }
       messages.push({ role: "assistant", content: parts }); continue;
     }
     messages.push({ role: m.role, content: typeof m.content === "string" ? m.content : mapContentParts(m.content) });
@@ -90,13 +97,45 @@ export function chatToIr(body: unknown): ConvResult {
       disableParallelToolUse: b.parallel_tool_calls === false || undefined,
       temperature: b.temperature, topP: b.top_p,
       maxTokens: b.max_completion_tokens ?? b.max_tokens ?? 4096,
-      stop: Array.isArray(b.stop) ? b.stop : b.stop !== undefined ? [b.stop] : undefined,
+      stop: Array.isArray(b.stop) ? b.stop : b.stop != null ? [b.stop] : undefined,
       stream: b.stream === true,
       effort: b.reasoning_effort ? EFFORT[b.reasoning_effort] : undefined,
       structuredOutput: rf?.type === "json_schema" ? rf.json_schema?.schema : undefined,
     },
     dropped,
   };
+}
+
+// IR image part -> URL usable in both openai formats: remote URLs pass through
+// verbatim; base64 payloads become a data: URL. Shared with responses.ts.
+export function imageUrl(p: Extract<IRContentPart, { type: "image" }>): string {
+  return p.mediaType === "url" ? p.data : `data:${p.mediaType};base64,${p.data}`;
+}
+
+// IR tool_result content -> plain string. anthropic content may be an array of
+// blocks: text blocks are joined, anything else is warned about and skipped.
+export function toolResultToString(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const texts: string[] = [];
+    for (const item of content) {
+      const t = (item as any)?.type;
+      if (t === "text" && typeof (item as any).text === "string") texts.push((item as any).text);
+      else console.warn(`[o2a2o] skipping non-text tool_result content block: ${String(t)}`);
+    }
+    return texts.join("");
+  }
+  return String(content);
+}
+
+// IR content part -> openai_chat multimodal content part. tool_use parts never
+// reach here (handled at message level as tool_calls); anything else is warned
+// about and skipped.
+function partToChatContent(p: IRContentPart): Record<string, unknown> | null {
+  if (p.type === "text") return { type: "text", text: p.text };
+  if (p.type === "image") return { type: "image_url", image_url: { url: imageUrl(p) } };
+  console.warn(`[openai_chat] skipping unsupported content part type: ${String(p.type)}`);
+  return null;
 }
 
 export function irToChat(ir: IRRequest): Record<string, unknown> {
@@ -107,7 +146,7 @@ export function irToChat(ir: IRRequest): Record<string, unknown> {
       const part = Array.isArray(m.content)
         ? m.content.find((p): p is Extract<IRContentPart, { type: "tool_result" }> => p.type === "tool_result")
         : undefined;
-      messages.push({ role: "tool", tool_call_id: part?.toolUseId, content: part ? String(part.content) : "" });
+      messages.push({ role: "tool", tool_call_id: part?.toolUseId, content: part ? toolResultToString(part.content) : "" });
       continue;
     }
     if (m.role === "assistant" && Array.isArray(m.content) && m.content.some((p) => p.type === "tool_use")) {
@@ -121,7 +160,10 @@ export function irToChat(ir: IRRequest): Record<string, unknown> {
       messages.push({ role: "assistant", content: text, tool_calls });
       continue;
     }
-    messages.push({ role: m.role, content: m.content });
+    messages.push({
+      role: m.role,
+      content: typeof m.content === "string" ? m.content : m.content.map(partToChatContent).filter((p): p is Record<string, unknown> => p !== null),
+    });
   }
   const out: Record<string, unknown> = {
     model: ir.model,
@@ -150,8 +192,16 @@ export function chatResponseToIr(res: unknown): IRResponse {
   const parts: IRContentPart[] = [];
   if (typeof msg.content === "string" && msg.content) parts.push({ type: "text", text: msg.content });
   else if (msg.content) parts.push(...mapContentParts(msg.content));
-  for (const c of msg.tool_calls ?? [])
-    parts.push({ type: "tool_use", id: c.id ?? "", name: c.function?.name ?? "", input: JSON.parse(c.function?.arguments || "{}") });
+  for (const c of msg.tool_calls ?? []) {
+    let input: unknown;
+    try { input = JSON.parse(c.function?.arguments || "{}"); }
+    catch {
+      // upstream data, not a client error: degrade instead of failing the request
+      input = {};
+      console.warn(`[openai_chat] malformed tool call arguments from upstream for ${String(c.function?.name)}, degrading to empty input`);
+    }
+    parts.push({ type: "tool_use", id: c.id ?? "", name: c.function?.name ?? "", input });
+  }
   return {
     id: r.id ?? "",
     model: r.model ?? "",

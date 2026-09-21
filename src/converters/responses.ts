@@ -3,7 +3,7 @@
 import type { IRContentPart, IRMessage, IRRequest, IRResponse } from "../types/ir";
 import type { ResponsesRequest, ResponsesResponse } from "../types/openai";
 import type { ConvResult } from "./chat";
-import { ParamError } from "./chat";
+import { ParamError, imageUrl, toolResultToString } from "./chat";
 
 // Structural params with no IR equivalent: recorded in `dropped`, never applied.
 const DROPPED = ["verbosity", "previous_response_id", "store", "truncation", "metadata"] as const;
@@ -28,6 +28,8 @@ function itemToContent(content: unknown): string | IRContentPart[] {
 
 export function responsesToIr(body: unknown): ConvResult {
   const b = body as ResponsesRequest;
+  if ((b as any).stream === true)
+    throw new ParamError("streaming is not supported in this gateway version (planned for M2)");
   if ((b.text as any)?.format?.type === "json_object")
     throw new ParamError('text.format json_object is not supported; use {"type":"json_schema"}');
   const dropped: string[] = [...DROPPED.filter((p) => (b as any)[p] !== undefined)];
@@ -49,9 +51,12 @@ export function responsesToIr(body: unknown): ConvResult {
         }
         messages.push({ role: item.role as IRMessage["role"], content: itemToContent(item.content) });
       } else if (item?.type === "function_call") {
+        let input: unknown;
+        try { input = JSON.parse(item.arguments || "{}"); }
+        catch { throw new ParamError(`malformed tool call arguments for ${String(item.name)}: not valid JSON`); }
         messages.push({
           role: "assistant",
-          content: [{ type: "tool_use", id: item.call_id ?? "", name: item.name ?? "", input: JSON.parse(item.arguments || "{}") }],
+          content: [{ type: "tool_use", id: item.call_id ?? "", name: item.name ?? "", input }],
         });
       } else if (item?.type === "function_call_output") {
         messages.push({
@@ -100,7 +105,7 @@ function messageToItems(m: IRMessage): Record<string, unknown>[] {
     const part = Array.isArray(m.content)
       ? m.content.find((p): p is Extract<IRContentPart, { type: "tool_result" }> => p.type === "tool_result")
       : undefined;
-    return [{ type: "function_call_output", call_id: part?.toolUseId, output: part !== undefined ? String(part.content) : String(m.content) }];
+    return [{ type: "function_call_output", call_id: part?.toolUseId, output: toolResultToString(part !== undefined ? part.content : m.content) }];
   }
   if (m.role === "assistant" && Array.isArray(m.content) && m.content.some((p) => p.type === "tool_use")) {
     const items: Record<string, unknown>[] = [];
@@ -118,14 +123,18 @@ function messageToItems(m: IRMessage): Record<string, unknown>[] {
 }
 
 // IR message -> openai_responses message item. Assistant text uses output_text,
-// other roles use input_text.
+// other roles use input_text; image parts serialize to input_image. Other part
+// types are warned about and skipped.
 function messageItem(role: string, content: string | IRContentPart[]): Record<string, unknown> {
   const partType = role === "assistant" ? "output_text" : "input_text";
   const c = typeof content === "string"
     ? [{ type: partType, text: content }]
-    : content
-        .filter((p): p is Extract<IRContentPart, { type: "text" }> => p.type === "text")
-        .map((p) => ({ type: partType, text: p.text }));
+    : content.flatMap((p): Record<string, unknown>[] => {
+        if (p.type === "text") return [{ type: partType, text: p.text }];
+        if (p.type === "image") return [{ type: "input_image", image_url: imageUrl(p) }];
+        console.warn(`[openai_responses] skipping unsupported content part type: ${String(p.type)}`);
+        return [];
+      });
   return { type: "message", role, content: c };
 }
 
