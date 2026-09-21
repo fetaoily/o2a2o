@@ -76,6 +76,7 @@ let foSlowKeys = new Set<string>();
 let foSlowClosed = 0;   // torn-down slow-key sockets (half-open streams)
 let foRequests = 0;     // requests the failover upstream saw
 let headersFailSeen = 0;
+let headersFailPrimary = 0; // headersFailSeen requests that used the primary key
 
 const chunked = (body: string): string => `${body.length.toString(16)}\r\n${body}\r\n0\r\n\r\n`;
 const SSE_HEADERS = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
@@ -224,12 +225,16 @@ beforeAll(() => {
   });
   // Headers-phase failure upstream: the first-priority key gets a 500 before
   // any stream bytes; every other key serves the normal SSE fixture.
+  // headersFailPrimary counts requests that presented the primary key, so the
+  // M3 health/reset test can assert pool selection order directly.
   headersFailUp = Bun.serve({
     port: 0, hostname: "127.0.0.1",
     fetch(req) {
       headersFailSeen += 1;
-      if (req.headers.get("authorization") === `Bearer ${K_FO_SLOW}`)
+      if (req.headers.get("authorization") === `Bearer ${K_FO_SLOW}`) {
+        headersFailPrimary += 1;
         return Response.json({ error: { message: "key exploded" } }, { status: 500 });
+      }
       return new Response(openaiSseFixture, { headers: { "content-type": "text/event-stream" } });
     },
   });
@@ -551,5 +556,97 @@ test("M3 failover: dynamic header key makes a single attempt with no pool intera
   } finally {
     foGw.stop(true);
     process.env.O2A2O_UPSTREAM_OPENAI = prevUp;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M3 Task 5: GET /health/keys + POST /admin/keys/:keyId/reset
+// ---------------------------------------------------------------------------
+
+// threshold 1: one retryable failure cools the primary; cooldown 60s keeps the
+// state stable for the whole test so every assertion is deterministic.
+const healthCfg = (): AppConfig => ({
+  ...cfgBase,
+  models: [{
+    name: "gpt-4o", provider: "openai",
+    api_keys: [{ key: K_FO_SLOW, priority: 1 }, { key: K_FO_FAST, priority: 2 }],
+  }],
+  aliases: {}, api_keys: {},
+  failover: { max_retries: 3, failure_threshold: 1, cooldown_ms: 60_000, latency_window: 10, recovery_successes: 3 },
+});
+
+test("M3 health/reset: primary cools down, /health/keys reports it, reset restores selection order", async () => {
+  const cfg = healthCfg();
+  const hg = startGateway(cfg);
+  const prevUp = process.env.O2A2O_UPSTREAM_OPENAI;
+  process.env.O2A2O_UPSTREAM_OPENAI = `http://127.0.0.1:${headersFailUp.port}`;
+  const id = maskKey(K_FO_SLOW);
+  const health = async () => (await (await fetch(`http://127.0.0.1:${hg.port}/health/keys`)).json()) as any;
+  try {
+    // Request A: attempt 1 on the primary gets a 500 (threshold 1 -> cooldown),
+    // attempt 2 succeeds on the secondary.
+    const seenA = headersFailSeen; const primA = headersFailPrimary;
+    const a = await postFo(hg.port, streamBody());
+    expect((await a.text())).toBe(openaiSseFixture);
+    expect(headersFailSeen - seenA).toBe(2);
+    expect(headersFailPrimary - primA).toBe(1);                 // primary took the first attempt
+    // Request B: the cooling primary is skipped, the secondary serves directly.
+    const seenB = headersFailSeen; const primB = headersFailPrimary;
+    const b = await postFo(hg.port, streamBody());
+    expect((await b.text())).toBe(openaiSseFixture);
+    expect(headersFailSeen - seenB).toBe(1);
+    expect(headersFailPrimary - primB).toBe(0);                 // cooldown exclusion held
+
+    const h1 = await health();
+    const st = h1.models["gpt-4o"][id];
+    expect(st.status).toBe("cooldown");
+    expect(st.consecutiveFailures).toBe(1);
+    expect(st.cooldownRemaining).toBeGreaterThan(0);
+    expect(st.cooldownRemaining).toBeLessThanOrEqual(60_000);
+    expect(h1.models["gpt-4o"][maskKey(K_FO_FAST)].status).toBe("healthy");
+    expect(JSON.stringify(h1)).not.toContain(K_FO_SLOW);        // masked output only
+    expect(typeof h1.timestamp).toBe("number");
+
+    // Wrong method on the admin path falls through to the generic 404.
+    const wrongMethod = await fetch(`http://127.0.0.1:${hg.port}/admin/keys/${encodeURIComponent(id)}/reset`);
+    expect(wrongMethod.status).toBe(404);
+    // Unknown keyId -> 404 in the openai error shape (M1 auth-401 precedent).
+    const unknown = await fetch(`http://127.0.0.1:${hg.port}/admin/keys/sk-no-such-key-9999/reset`, { method: "POST" });
+    expect(unknown.status).toBe(404);
+    expect((await unknown.json()) as any).toEqual({ error: { message: "unknown key id", type: "not_found_error" } });
+
+    const reset = await fetch(`http://127.0.0.1:${hg.port}/admin/keys/${encodeURIComponent(id)}/reset`, { method: "POST" });
+    expect(reset.status).toBe(200);
+    expect((await reset.json()) as any).toEqual({ reset: true, keyId: id });
+
+    const h2 = await health();
+    expect(h2.models["gpt-4o"][id]).toMatchObject({ status: "healthy", consecutiveFailures: 0, cooldownRemaining: 0 });
+
+    // Request C: the primary is selectable again and takes the first attempt
+    // (its 500 is recorded, the secondary still completes the request).
+    const seenC = headersFailSeen; const primC = headersFailPrimary;
+    const c = await postFo(hg.port, streamBody());
+    expect((await c.text())).toBe(openaiSseFixture);
+    expect(headersFailSeen - seenC).toBe(2);
+    expect(headersFailPrimary - primC).toBe(1);                 // selection order restored
+  } finally {
+    hg.stop(true);
+    process.env.O2A2O_UPSTREAM_OPENAI = prevUp;
+  }
+});
+
+test("M3 health/reset: auth_token gate covers both endpoints", async () => {
+  const cfg = { ...healthCfg(), server: { ...cfgBase.server, port: 0, auth_token: "sec" } };
+  const ag = startGateway(cfg);
+  const base = `http://127.0.0.1:${ag.port}`;
+  try {
+    expect((await fetch(`${base}/health/keys`)).status).toBe(401);
+    expect((await fetch(`${base}/admin/keys/whatever/reset`, { method: "POST" })).status).toBe(401);
+    expect((await fetch(`${base}/health/keys`, { headers: { authorization: "Bearer sec" } })).status).toBe(200);
+    // Authenticated but unknown id: past the gate, into the 404 branch.
+    const admin = await fetch(`${base}/admin/keys/whatever/reset`, { method: "POST", headers: { authorization: "Bearer sec" } });
+    expect(admin.status).toBe(404);
+  } finally {
+    ag.stop(true);
   }
 });

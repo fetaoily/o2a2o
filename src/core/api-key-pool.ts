@@ -147,6 +147,20 @@ export class ApiKeyPool {
     }
   }
 
+  // Manual operator reset (POST /admin/keys/:keyId/reset): back to healthy
+  // with a clean failure streak and no cooldown; latency history and the
+  // lifetime failure counter are kept. Unknown keyId is a no-op returning
+  // false; a known one is reset and returns true.
+  resetKey(keyId: string): boolean {
+    const e = this.entries.get(keyId);
+    if (!e) return false;
+    e.st.status = "healthy";
+    e.st.consecutiveFailures = 0;
+    e.st.cooldownUntil = 0;
+    e.degradedWins = 0;
+    return true;
+  }
+
   // /health/keys data source: keyed by masked keyId, plaintext key omitted.
   // Object.assign yields the Record & { keys } intersection without a cast.
   snapshot(): Record<string, Omit<KeyState, "key">> & { keys: string[] } {

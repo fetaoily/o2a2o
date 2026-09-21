@@ -5,7 +5,7 @@ import type { AppConfig } from "./config/loader";
 import type { InputFormat } from "./core/format-detector";
 import { detectFormat } from "./core/format-detector";
 import { handleGatewayRequest, handleGatewayStream, wantsStreaming } from "./core/unified-converter";
-import { checkAuth, modelsBody } from "./core/models-endpoint";
+import { checkAuth, modelsBody, healthKeysBody, resolveKeyId } from "./core/models-endpoint";
 import { ParamError } from "./converters/chat";
 import { UpstreamError } from "./core/forwarder";
 import { toClientError } from "./converters/errors";
@@ -76,6 +76,23 @@ export function startGateway(cfg: AppConfig): ReturnType<typeof Bun.serve> {
         }
       }
       if (req.method === "GET" && url.pathname === "/v1/models") return modelsHandler(cfg, req);
+      // M3 monitoring/admin endpoints: one canonical shape each, so the
+      // /v1/models anthropic-shape negotiation does not apply. Both sit behind
+      // the auth gate above; non-matching methods fall through to the 404.
+      if (req.method === "GET" && url.pathname === "/health/keys")
+        return new Response(JSON.stringify(healthKeysBody(cfg)), { status: 200, headers: { "content-type": "application/json" } });
+      const resetMatch = req.method === "POST" ? /^\/admin\/keys\/([^/]+)\/reset$/.exec(url.pathname) : null;
+      if (resetMatch) {
+        const keyId = resetMatch[1]; // masked id, plain ASCII by construction: no decoding
+        const pool = resolveKeyId(cfg, keyId);
+        if (!pool)
+          return new Response(JSON.stringify({ error: { message: "unknown key id", type: "not_found_error" } }), {
+            status: 404,
+            headers: { "content-type": "application/json" },
+          });
+        pool.resetKey(keyId);
+        return new Response(JSON.stringify({ reset: true, keyId }), { status: 200, headers: { "content-type": "application/json" } });
+      }
       return new Response(JSON.stringify({ error: { message: "not found", type: "invalid_request_error" } }), { status: 404 });
     },
   });

@@ -266,3 +266,31 @@ test("empty pool: select throws ConfigError instead of returning an undefined de
   const pool = new ApiKeyPool(cfg(), [], () => 0);
   expect(() => pool.select()).toThrow(ConfigError);
 });
+
+test("resetKey: cooldown cleared, failures zeroed, latency history kept, selection order restored", () => {
+  const c = clk(1_000_000);
+  const a = { key: "sk-reset-flaky-aaaaaaaaa-1111", priority: 10 };
+  const b = { key: "sk-reset-clean-bbbbbbbbb-2222", priority: 20 };
+  const pool = new ApiKeyPool(cfg({ recovery_successes: 5 }), [a, b], c.now);
+  pool.recordSuccess(maskKey(a.key), 120);
+  for (let i = 0; i < 3; i++) pool.recordFailure(maskKey(a.key)); // threshold 3 -> cooldown
+  expect(pool.snapshot()[maskKey(a.key)].status).toBe("cooldown");
+  expect(pool.select().keyId).toBe(maskKey(b.key)); // a excluded while cooling
+
+  expect(pool.resetKey(maskKey(a.key))).toBe(true);
+  const s = pool.snapshot()[maskKey(a.key)];
+  expect(s.status).toBe("healthy");
+  expect(s.consecutiveFailures).toBe(0);
+  expect(s.cooldownUntil).toBe(0);
+  expect(s.totalFailures).toBe(3);         // lifetime counter is kept
+  expect(s.latencySamples).toEqual([120]); // history kept through the reset
+  expect(s.avgLatency).toBe(120);
+  expect(pool.select().keyId).toBe(maskKey(a.key)); // priority order restored over b
+});
+
+test("resetKey: unknown keyId is a no-op returning false", () => {
+  const pool = new ApiKeyPool(cfg(), [{ key: "sk-reset-unknown-aaaaaaaa-1111", priority: 10 }], clk().now);
+  const before = pool.snapshot();
+  expect(pool.resetKey("sk-no-such-key-9999")).toBe(false);
+  expect(pool.snapshot()).toEqual(before);
+});
