@@ -17,3 +17,7 @@ test("parsePort warns and ignores non-numeric", () => {
   expect(parsePort("abc")).toBeUndefined();
   expect(parsePort("9090")).toBe(9090);
 });
+test("convert parses args", () => {
+  expect(parseArgv(["convert", "--input", "r.json"])).toEqual({ cmd: "convert", inputPath: "r.json", to: undefined });
+  expect(parseArgv(["convert", "--input", "r.json", "--to", "anthropic"])).toEqual({ cmd: "convert", inputPath: "r.json", to: "anthropic" });
+});
