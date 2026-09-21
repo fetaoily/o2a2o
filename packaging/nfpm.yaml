@@ -1,0 +1,23 @@
+# nfpm config for the o2a2o Linux packages (deb + rpm).
+# Driven by scripts/package-linux.mjs, which sets:
+#   NFPM_ARCH    - amd64 | arm64 (Go nomenclature; nfpm maps deb/rpm arch names)
+#   NFPM_VERSION - the package version from package.json
+# The binary is staged at dist/.staging/o2a2o per run so one config serves both arches.
+name: o2a2o
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${NFPM_VERSION}
+section: net
+priority: optional
+maintainer: O2A2O Maintainers <maintainers@o2a2o.invalid>
+description: |
+  O2A2O gateway service.
+contents:
+  - src: dist/.staging/o2a2o
+    dst: /usr/local/bin/o2a2o
+    file_info:
+      mode: 0755
+  - src: packaging/o2a2o.service
+    dst: /etc/systemd/system/o2a2o.service
+    file_info:
+      mode: 0644

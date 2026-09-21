@@ -1,0 +1,11 @@
+[Unit]
+Description=O2A2O gateway
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/o2a2o serve --config /etc/o2a2o/o2a2o.yaml
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

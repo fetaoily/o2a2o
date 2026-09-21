@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.o2a2o</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/o2a2o</string>
+        <string>serve</string>
+        <string>--config</string>
+        <string>/etc/o2a2o/o2a2o.yaml</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/o2a2o.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/o2a2o.log</string>
+</dict>
+</plist>

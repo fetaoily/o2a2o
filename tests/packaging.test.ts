@@ -1,0 +1,145 @@
+// Packaging tests: assert the OUTPUTS of scripts/package-*.mjs (the files in
+// dist/installers/), not the scripts themselves. Zip/tar assertions are pure
+// JS (scripts/lib/archiver.ts readers); deb/rpm assertions only check file
+// existence, naming and size — and are skipped when the nfpm tool is absent
+// (platform/tool availability guard).
+import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { extractZipEntry, readTarGzEntries, readZipEntries } from "../scripts/lib/archiver";
+
+const root = join(import.meta.dir, "..");
+const dist = join(root, "dist");
+const installers = join(dist, "installers");
+
+const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+const v = `v${pkg.version}-rc.1`;
+
+const EXPECTED_ASSETS = [
+  `o2a2o_${v}_windows-x64.zip`,
+  `o2a2o_${v}_linux-amd64.deb`,
+  `o2a2o_${v}_linux-arm64.deb`,
+  `o2a2o_${v}_linux-amd64.rpm`,
+  `o2a2o_${v}_linux-arm64.rpm`,
+  `o2a2o_${v}_linux-amd64.tar.gz`,
+  `o2a2o_${v}_linux-arm64.tar.gz`,
+  `o2a2o_${v}_macos-arm64.tar.gz`,
+  `o2a2o_${v}_macos-x64.tar.gz`,
+];
+
+// nfpm availability guard: deb/rpm are produced by the pinned nfpm binary in
+// packaging/.tools/ (downloaded by scripts/package-linux.mjs) or a system nfpm.
+const nfpmTool = join(root, "packaging", ".tools", process.platform === "win32" ? "nfpm.exe" : "nfpm");
+const nfpmAvailable = existsSync(nfpmTool);
+
+const isExec = (mode: number) => (mode & 0o111) !== 0;
+
+describe("installer asset set", () => {
+  test("dist/installers contains exactly the nine RC assets", () => {
+    const files = readdirSync(installers).filter((f) => f !== "checksums.txt").sort();
+    expect(files).toEqual([...EXPECTED_ASSETS].sort());
+  });
+
+  test("every installer is nonzero", () => {
+    for (const asset of EXPECTED_ASSETS) {
+      expect(statSync(join(installers, asset)).size).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("windows zip", () => {
+  const zipPath = () => readFileSync(join(installers, `o2a2o_${v}_windows-x64.zip`));
+
+  test("contains the binary, install.ps1 and README", () => {
+    const names = readZipEntries(zipPath()).map((e) => e.name);
+    expect(names).toContain("o2a2o-windows-x64.exe");
+    expect(names).toContain("install.ps1");
+    expect(names).toContain("README.md");
+  });
+
+  test("zip member holds the full windows binary (size and exec mode)", () => {
+    const exe = readZipEntries(zipPath()).find((e) => e.name === "o2a2o-windows-x64.exe");
+    expect(exe).toBeDefined();
+    expect(isExec(exe!.mode)).toBe(true);
+    const distBinary = statSync(join(dist, "o2a2o-windows-x64.exe"));
+    expect(exe!.size).toBe(distBinary.size);
+  });
+
+  test("install.ps1 supports the default per-user install dir and -AddToPath", () => {
+    const script = extractZipEntry(zipPath(), "install.ps1").toString("utf8");
+    expect(script).toContain("AddToPath");
+    expect(script).toContain("LOCALAPPDATA");
+  });
+});
+
+describe("linux deb/rpm", () => {
+  const packages = EXPECTED_ASSETS.filter((a) => a.endsWith(".deb") || a.endsWith(".rpm"));
+
+  test.skipIf(!nfpmAvailable)("deb and rpm files exist with nonzero size", () => {
+    for (const asset of packages) {
+      const path = join(installers, asset);
+      expect(existsSync(path)).toBe(true);
+      expect(statSync(path).size).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("linux tarballs", () => {
+  // asset arch name (amd64) -> build-all.mjs binary name (x64)
+  const DIST_BINARY = { amd64: "o2a2o-linux-x64", arm64: "o2a2o-linux-arm64" } as const;
+  for (const arch of ["amd64", "arm64"] as const) {
+    test(`${arch}: contains binary + o2a2o.service + install.sh`, () => {
+      const gz = readFileSync(join(installers, `o2a2o_${v}_linux-${arch}.tar.gz`));
+      const entries = readTarGzEntries(gz);
+      const byName = new Map(entries.map((e) => [e.name, e]));
+      expect([...byName.keys()].sort()).toEqual(["install.sh", "o2a2o", "o2a2o.service"]);
+
+      const bin = byName.get("o2a2o")!;
+      expect(isExec(bin.mode)).toBe(true);
+      expect(bin.size).toBe(statSync(join(dist, DIST_BINARY[arch])).size);
+
+      const unit = byName.get("o2a2o.service")!;
+      expect(isExec(unit.mode)).toBe(false);
+      expect(unit.size).toBeGreaterThan(0);
+
+      const install = byName.get("install.sh")!;
+      expect(isExec(install.mode)).toBe(true);
+    });
+  }
+});
+
+describe("macos tarballs", () => {
+  for (const arch of ["arm64", "x64"] as const) {
+    test(`${arch}: contains binary + launchd plist`, () => {
+      const gz = readFileSync(join(installers, `o2a2o_${v}_macos-${arch}.tar.gz`));
+      const entries = readTarGzEntries(gz);
+      const byName = new Map(entries.map((e) => [e.name, e]));
+      expect([...byName.keys()].sort()).toEqual(["com.o2a2o.plist", "o2a2o"]);
+
+      const bin = byName.get("o2a2o")!;
+      expect(isExec(bin.mode)).toBe(true);
+      expect(bin.size).toBe(statSync(join(dist, `o2a2o-darwin-${arch}`)).size);
+
+      const plist = byName.get("com.o2a2o.plist")!;
+      expect(isExec(plist.mode)).toBe(false);
+      expect(plist.size).toBeGreaterThan(0);
+    });
+  }
+});
+
+describe("installer checksums", () => {
+  test("dist/installers/checksums.txt lists every asset with its real sha256", () => {
+    const text = readFileSync(join(installers, "checksums.txt"), "utf8");
+    const lines = text.trimEnd().split("\n");
+    expect(lines).toHaveLength(EXPECTED_ASSETS.length);
+    for (const line of lines) {
+      const m = line.match(/^([0-9a-f]{64})  (.+)$/);
+      expect(m).not.toBeNull();
+      const [, hash, name] = m!;
+      expect(EXPECTED_ASSETS).toContain(name);
+      const actual = createHash("sha256").update(readFileSync(join(installers, name))).digest("hex");
+      expect(hash).toBe(actual);
+    }
+  });
+});
