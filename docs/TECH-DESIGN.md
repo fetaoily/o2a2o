@@ -226,6 +226,9 @@ update:
 ### 6.2 加载与校验（`src/config/`）
 
 - `${VAR}` 环境变量解析；变量未定义 → 启动失败并指明字段路径；
+- 上游地址可通过环境变量覆盖（默认官方端点，用于测试与 OpenAI/Anthropic 兼容网关）：
+  - `O2A2O_UPSTREAM_OPENAI`（默认 `https://api.openai.com`）
+  - `O2A2O_UPSTREAM_ANTHROPIC`（默认 `https://api.anthropic.com`）
 - 校验规则：`models` 非空、`provider` 取值合法、`name` 唯一、别名不成环、数值字段范围合法；
 - `o2a2o config validate` 与启动加载复用同一校验器；
 - `o2a2o config init` 输出此模板。
