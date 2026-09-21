@@ -83,11 +83,29 @@ function usageWire(u: TokenUsage): Record<string, number> {
 }
 
 // Builds openai_chat chat.completion.chunk SSE frames from StreamEvents.
-// Chunk bodies carry only the fields the gateway actually knows
-// (choices/delta/usage); no id/model/created are fabricated.
+// Data-carrying chunk frames carry the verified chunk envelope (id /
+// object / created / model, section 18), synthesized once at construction
+// so one stream shares a single id and timestamp. The error frame carries
+// no envelope, matching upstream mid-stream error frames.
 export class ChatStreamEncoder {
   private roleSent = false;
   private finishSent = false;
+  private readonly id: string;
+  private readonly model: string;
+  private readonly created: number;
+
+  constructor(meta?: { id?: string; model?: string }) {
+    this.id = meta?.id ?? `chatcmpl-${crypto.randomUUID()}`;
+    this.model = meta?.model ?? "unknown";
+    this.created = Math.floor(Date.now() / 1000);
+  }
+
+  // One chunk frame with the envelope + the given body fields.
+  private chunk(body: Record<string, unknown>): string {
+    return encodeSse(JSON.stringify({
+      id: this.id, object: "chat.completion.chunk", created: this.created, model: this.model, ...body,
+    }));
+  }
 
   // Returns the SSE text for this event (possibly several frames, possibly
   // "" when the event produces no output).
@@ -96,28 +114,29 @@ export class ChatStreamEncoder {
       case "start": {
         if (this.roleSent) return "";
         this.roleSent = true;
-        return encodeSse(JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant" } }] }));
+        return this.chunk({ choices: [{ index: 0, delta: { role: "assistant" } }] });
       }
       case "text_delta":
-        return encodeSse(JSON.stringify({ choices: [{ index: 0, delta: { content: ev.text } }] }));
+        return this.chunk({ choices: [{ index: 0, delta: { content: ev.text } }] });
       case "tool_start":
-        return encodeSse(JSON.stringify({
+        return this.chunk({
           choices: [{ index: 0, delta: { tool_calls: [{ index: ev.index, id: ev.id, type: "function", function: { name: ev.name, arguments: "" } }] } }],
-        }));
+        });
       case "tool_delta":
-        return encodeSse(JSON.stringify({
+        return this.chunk({
           choices: [{ index: 0, delta: { tool_calls: [{ index: ev.index, function: { arguments: ev.partialJson } }] } }],
-        }));
+        });
       case "end": {
         if (this.finishSent) return "";
         this.finishSent = true;
         const choice: Record<string, unknown> = { index: 0, delta: {}, finish_reason: STOP_TO_FINISH[ev.stopReason] };
         if (ev.usage) choice.usage = usageWire(ev.usage);
-        return encodeSse(JSON.stringify({ choices: [choice] }));
+        return this.chunk({ choices: [choice] });
       }
       case "error":
         // Mid-stream errors surface as an error JSON frame (section 10);
-        // the caller closes the stream afterwards.
+        // the caller closes the stream afterwards. No envelope, matching
+        // upstream error frames.
         return encodeSse(JSON.stringify({ error: { message: ev.message } }));
     }
   }
@@ -130,7 +149,7 @@ export class ChatStreamEncoder {
       ? { type: "end", stopReason: "stop", usage }
       : { type: "end", stopReason: "stop" };
     let out = this.push(end);
-    if (usage) out += encodeSse(JSON.stringify({ choices: [], usage: usageWire(usage) }));
+    if (usage) out += this.chunk({ choices: [], usage: usageWire(usage) });
     return out + encodeSse("[DONE]");
   }
 }

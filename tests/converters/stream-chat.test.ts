@@ -32,3 +32,11 @@ test("finish_reason maps stop_reason table", () => {
   const e = new ChatStreamEncoder();
   expect(e.push({ type: "end", stopReason: "tool_use" })).toContain('"tool_calls"');
 });
+test("encoder chunks carry the verified envelope fields", () => {
+  const e = new ChatStreamEncoder({ id: "chatcmpl-x", model: "gpt-4o" });
+  const out = e.push({ type: "start" }) + e.push({ type: "text_delta", text: "Hi" }) + e.finish();
+  expect(out).toContain('"id":"chatcmpl-x"');
+  expect(out).toContain('"object":"chat.completion.chunk"');
+  expect(out).toContain('"model":"gpt-4o"');
+  expect(out).toContain('"created":');
+});
