@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeTarGz } from "./lib/archiver.ts";
+import { writeInstallerChecksums } from "./lib/checksums.ts";
 import { ensureNfpm } from "./lib/nfpm.ts";
 
 const root = join(import.meta.dir, "..");
@@ -26,6 +27,9 @@ const DIST_BINARY = { amd64: "o2a2o-linux-x64", arm64: "o2a2o-linux-arm64" };
 const stagingDir = join(dist, ".staging");
 mkdirSync(stagingDir, { recursive: true });
 
+// Asset names derive verbatim from the package.json version (which carries
+// the prerelease suffix during the RC period) — nothing appends -rc.1.
+const produced = [];
 for (const arch of ["amd64", "arm64"]) {
   const binPath = join(dist, DIST_BINARY[arch]);
   if (!existsSync(binPath)) {
@@ -35,7 +39,8 @@ for (const arch of ["amd64", "arm64"]) {
   copyFileSync(binPath, join(stagingDir, "o2a2o"));
 
   for (const packager of ["deb", "rpm"]) {
-    const target = join(outDir, `o2a2o_v${version}-rc.1_linux-${arch}.${packager}`);
+    const name = `o2a2o_v${version}_linux-${arch}.${packager}`;
+    const target = join(outDir, name);
     const r = spawnSync(
       nfpm,
       ["package", "-f", "packaging/nfpm.yaml", "-p", packager, "-t", target],
@@ -45,6 +50,7 @@ for (const arch of ["amd64", "arm64"]) {
       console.error(`nfpm ${packager} ${arch} failed (exit ${r.status})`);
       process.exit(r.status ?? 1);
     }
+    produced.push(name);
   }
 
   const tarball = writeTarGz([
@@ -52,7 +58,10 @@ for (const arch of ["amd64", "arm64"]) {
     { name: "o2a2o.service", data: readFileSync(join(root, "packaging", "o2a2o.service")), mode: 0o644 },
     { name: "install.sh", data: readFileSync(join(root, "packaging", "linux", "install.sh")), mode: 0o755 },
   ]);
-  const tarPath = `o2a2o_v${version}-rc.1_linux-${arch}.tar.gz`;
+  const tarPath = `o2a2o_v${version}_linux-${arch}.tar.gz`;
   writeFileSync(join(outDir, tarPath), tarball);
+  produced.push(tarPath);
   console.log(`wrote dist/installers/${tarPath} (${tarball.length} bytes)`);
 }
+
+writeInstallerChecksums(outDir, produced);

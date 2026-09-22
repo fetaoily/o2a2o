@@ -6,7 +6,11 @@
 //           2. the tag exists neither locally (git rev-parse) nor as a
 //              GitHub release (gh release view) — never overwritten
 //           3. the working tree has no uncommitted changes to tracked files
-//   publish: git tag v<version>-rc.1  ->  git push origin <tag>  (triggers CI)
+//   publish: git tag v<version>  ->  git push origin <tag>  (triggers CI)
+//
+// The repo version IS the release version: during the RC period package.json
+// itself carries the prerelease suffix, so the tag is exactly v<version> —
+// nothing appends an extra suffix here.
 //
 // No artifacts are built or uploaded here; CI owns that. On failure the
 // script prints what succeeded plus a single retry command and exits 1 — it
@@ -41,7 +45,7 @@ function main() {
   process.chdir(root);
   const resume = process.argv.includes("--resume");
   const { version } = JSON.parse(readFileSync("package.json", "utf8"));
-  const tag = `v${version}-rc.1`;
+  const tag = `v${version}`;
   console.log(`o2a2o RC release (tag + CI trigger): version ${version} -> tag ${tag}${resume ? " (--resume)" : ""}`);
 
   // --- pre-flight gates ---

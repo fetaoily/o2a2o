@@ -2,8 +2,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
-permissions:
-  contents: write
+# Workflow default is the read-only token; only the release job (which runs
+# `gh release create`) elevates to contents: write, scoped in that job.
 
 jobs:
   build:
@@ -46,6 +46,8 @@ jobs:
   release:
     needs: [build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       # Without merge-multiple each artifact lands in its own directory:

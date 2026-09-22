@@ -28,3 +28,12 @@ describe("release.yml matrix vs package.json scripts", () => {
     }
   });
 });
+
+describe("release.yml permissions", () => {
+  test("write permission is scoped to the release job (build jobs stay read-only)", () => {
+    // no workflow-level permissions block (a job-level one is indented)
+    expect(release).not.toMatch(/^permissions:/m);
+    const job = release.slice(release.indexOf("  release:"));
+    expect(job).toContain("permissions:\n      contents: write");
+  });
+});

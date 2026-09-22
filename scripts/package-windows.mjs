@@ -4,6 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeZip } from "./lib/archiver.ts";
+import { writeInstallerChecksums } from "./lib/checksums.ts";
 
 const root = join(import.meta.dir, "..");
 const dist = join(root, "dist");
@@ -16,7 +17,9 @@ if (!existsSync(binary)) {
 }
 
 const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
-const asset = `o2a2o_v${version}-rc.1_windows-x64.zip`;
+// Asset names derive verbatim from the package.json version (which carries
+// the prerelease suffix during the RC period) — nothing appends -rc.1.
+const asset = `o2a2o_v${version}_windows-x64.zip`;
 
 mkdirSync(outDir, { recursive: true });
 const zip = writeZip([
@@ -25,4 +28,5 @@ const zip = writeZip([
   { name: "README.md", data: readFileSync(join(root, "packaging", "windows", "README.md")), mode: 0o644 },
 ]);
 writeFileSync(join(outDir, asset), zip);
+writeInstallerChecksums(outDir, [asset]);
 console.log(`wrote dist/installers/${asset} (${zip.length} bytes)`);

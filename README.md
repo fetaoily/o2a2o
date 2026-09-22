@@ -207,8 +207,12 @@ Windows zip with `install.ps1`; Linux `deb`/`rpm` plus a `.tar.gz` with a
 systemd unit and `install.sh`; macOS `.tar.gz` with a launchd plist — and one
 merged `checksums.txt` covering every asset (one sha256 line each). `bun run
 release:rc` is the local helper for the safe part: it gates on a green test
-suite, a clean tree and tag uniqueness, then tags `v<version>-rc.1` and pushes
-it to trigger CI. Current RC downloads:
+suite, a clean tree and tag uniqueness, then tags `v<version>` and pushes
+it to trigger CI. The repo version IS the release version: during the RC
+period `package.json` itself carries the prerelease suffix (e.g.
+`0.3.0-rc.1`), and the tag and installer asset names derive verbatim from it —
+nothing appends `-rc.1` anywhere. With `allow_prerelease: true`, RC installs
+keep receiving `rc.N` releases and later the stable bump. Current RC downloads:
 
 https://github.com/fetaoily/o2a2o/releases
 

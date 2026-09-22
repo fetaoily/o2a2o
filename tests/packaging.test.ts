@@ -14,7 +14,9 @@ const dist = join(root, "dist");
 const installers = join(dist, "installers");
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
-const v = `v${pkg.version}-rc.1`;
+// Asset names derive verbatim from the package.json version (which carries
+// the prerelease suffix during the RC period) — nothing appends -rc.1.
+const v = `v${pkg.version}`;
 
 const EXPECTED_ASSETS = [
   `o2a2o_${v}_windows-x64.zip`,
