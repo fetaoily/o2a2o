@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import { modelsBody, checkAuth, healthKeysBody, resolveKeyId } from "../../src/core/models-endpoint";
 import { KeyPoolRegistry } from "../../src/core/forwarder";
 import { maskKey } from "../../src/utils/logger";
+import { ConfigError } from "../../src/config/loader";
 import type { AppConfig } from "../../src/config/loader";
 
 const cfg: AppConfig = {
@@ -72,4 +73,29 @@ test("resolveKeyId: finds the owning pool by masked id across models; unknown id
   expect(found).toBeDefined();
   expect(found!.snapshot().keys).toContain(maskKey(K_BACKUP));
   expect(resolveKeyId(poolCfg, "sk-no-such-key-9999")).toBeUndefined();
+});
+
+// Only the keyless case may render an empty entry: a duplicate masked key id
+// is a genuinely broken config and must fail the health endpoint loudly, not
+// masquerade as an empty inventory.
+test("healthKeysBody: duplicate key ids propagate instead of an empty entry", () => {
+  const dupA = "sk-hc-dupAAAA-7777";
+  const dupB = "sk-hc-dupBBBB-7777";
+  expect(maskKey(dupA)).toBe(maskKey(dupB)); // same first 8 and last 4
+  const bad: AppConfig = {
+    ...poolCfg,
+    models: [{ name: "dup", provider: "openai", api_keys: [{ key: dupA, priority: 1 }, { key: dupB, priority: 2 }] }],
+  };
+  expect(() => healthKeysBody(bad)).toThrow(/duplicate key id in pool/);
+  expect(() => healthKeysBody(bad)).toThrow(ConfigError);
+});
+
+// Any non-keyless failure (injected here as a TypeError) must escape
+// healthKeysBody — no blanket catch may turn a broken pool into `{}`.
+test("healthKeysBody: a non-ConfigError from the pool propagates", () => {
+  const boom = {
+    poolFor: () => { throw new TypeError("boom"); },
+  } as unknown as KeyPoolRegistry;
+  expect(() => healthKeysBody(poolCfg, { registry: boom })).toThrow(TypeError);
+  expect(() => healthKeysBody(poolCfg, { registry: boom })).toThrow("boom");
 });

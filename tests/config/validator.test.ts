@@ -59,3 +59,21 @@ test("non-number timeout leaf rejected", () => {
   const c = base(); (c as any).timeout = { stream: { first_packet: "5000" } };
   expect(validateConfig(c)[0]).toMatch(/must be a positive number/);
 });
+
+test("negative failover values rejected", () => {
+  const c = base(); (c as any).failover = { max_retries: -1 };
+  expect(validateConfig(c)[0]).toMatch(/failover\.max_retries must be a positive number/);
+});
+
+test("fractional failover counts rejected; durations stay float-allowed", () => {
+  // Every counting-class field must be a whole number...
+  for (const f of ["max_retries", "failure_threshold", "latency_window", "recovery_successes"]) {
+    const c = base(); (c as any).failover = { [f]: 2.5 };
+    expect(validateConfig(c)[0]).toMatch(new RegExp(`failover\\.${f} must be a positive integer`));
+  }
+  // ...while duration fields accept fractions (cooldown_ms and timeout leaves).
+  const d = base(); (d as any).failover = { cooldown_ms: 300000.5 };
+  expect(validateConfig(d)).toEqual([]);
+  const t = base(); (t as any).timeout = { stream: { first_packet: 5000.5 } };
+  expect(validateConfig(t)).toEqual([]);
+});

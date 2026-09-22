@@ -3,15 +3,29 @@ import { CONFIG_TEMPLATE } from "./template";
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1"]);
 
-function checkPositive(section: string, node: unknown, path: string, errs: string[]): void {
+// Counting-class failover fields must be whole numbers; duration fields
+// (failover.cooldown_ms and every timeout.* leaf) stay float-allowed. The
+// timeout section has no counting-class fields, so it uses the default
+// float-allowed check.
+const FAILOVER_INT_FIELDS = new Set(["max_retries", "failure_threshold", "latency_window", "recovery_successes"]);
+
+function checkPositive(
+  section: string,
+  node: unknown,
+  path: string,
+  errs: string[],
+  intFields: ReadonlySet<string> = new Set(),
+): void {
   if (typeof node === "number") {
     if (!Number.isFinite(node) || node <= 0)
       errs.push(`${section}.${path} must be a positive number`);
+    else if (intFields.has(path) && !Number.isInteger(node))
+      errs.push(`${section}.${path} must be a positive integer`);
     return;
   }
   if (!Array.isArray(node) && node && typeof node === "object") {
     for (const [k, v] of Object.entries(node))
-      checkPositive(section, v, path ? `${path}.${k}` : k, errs);
+      checkPositive(section, v, path ? `${path}.${k}` : k, errs, intFields);
   } else {
     errs.push(`${section}.${path} must be a positive number`);
   }
@@ -39,7 +53,7 @@ export function validateConfig(cfg: AppConfig): string[] {
       errs.push(`timeout.non_stream.by_request.min must be <= max (${br.min} > ${br.max})`);
   }
   if (cfg.failover) {
-    checkPositive("failover", cfg.failover, "", errs);
+    checkPositive("failover", cfg.failover, "", errs, FAILOVER_INT_FIELDS);
   }
   return errs;
 }

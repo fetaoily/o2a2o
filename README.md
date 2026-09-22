@@ -7,7 +7,7 @@ configured provider, so an OpenAI SDK client can transparently call a Claude mod
 versa. Conversion goes through a shared internal representation (IR); same-provider requests
 pass through untouched.
 
-## Scope (M1 + M2 + M3)
+## Scope (M1 + M2 + M3 + M4)
 
 **Supported**
 
@@ -41,11 +41,10 @@ pass through untouched.
   `idle`, `total_max` (partial output is delivered, then the stream closes). The idle
   check samples periodically, so an idle abort fires after roughly
   `idle + idle_grace_period + idle_check_interval` (~75s at defaults)
-- CLI: `serve`, `config init|validate|routes`, `convert`, `version`
-
-**Not yet (roadmap M4)**
-
-- Auto-update and multi-platform release builds (M4)
+- CLI: `serve`, `config init|validate|routes`, `convert`, `update`, `version`
+- Self-update from GitHub Releases (M4): `o2a2o update` plus an optional
+  startup check — checksum-verified download, atomic in-place replace with
+  automatic rollback (see [Auto-update and installation](#auto-update-and-installation-m4))
 
 ## Quick start
 
@@ -92,6 +91,7 @@ o2a2o config init                            print a starter config template to 
 o2a2o config validate <path>                 validate a config file
 o2a2o config routes                          list models, aliases and masked keys
 o2a2o convert --input <path> [--to <fmt>]    convert a request body between protocols
+o2a2o update                                 check GitHub Releases and self-update the binary
 o2a2o version                                print the version
 ```
 
@@ -166,6 +166,51 @@ curl -s -X POST http://127.0.0.1:8080/admin/keys/sk-ant-a...x9Q2/reset \
   -H "authorization: Bearer $O2A2O_TOKEN"
 # {"reset":true,"keyId":"sk-ant-a...x9Q2"}
 ```
+
+## Auto-update and installation (M4)
+
+`o2a2o update` self-updates the binary from GitHub Releases. It resolves the
+`update` config section, queries the repo's releases for a version strictly
+newer than the running one (prereleases only when `allow_prerelease` is true)
+and, when one exists, installs it without prompting: the asset built for the
+running platform/arch is downloaded and verified against the release's
+`checksums.txt` (SHA256 — a release without that file is refused outright,
+nothing is installed unverified), then the current binary is backed up and
+atomically replaced (a running Windows exe is renamed aside, never
+overwritten). The new binary must then run `--version` and report the new
+version; on any verification failure the previous binary is rolled back
+automatically. Set `update.enabled: false` to disable the command.
+
+Separately, `serve` runs one background update check at startup (disable with
+`update.check_on_start: false`): it prints a single
+`update available: <version>` line when a newer release exists, and never
+blocks serving or installs anything.
+
+The `update` config section (all keys optional, defaults shown):
+
+```yaml
+update:
+  enabled: true
+  repo: "fetaoily/o2a2o"      # GitHub repo serving Releases
+  check_on_start: true
+  allow_prerelease: true      # current releases are RC prereleases
+```
+
+### Releases and installers
+
+Releases are built by GitHub Actions, not locally: pushing a `v*` tag triggers
+[.github/workflows/release.yml](.github/workflows/release.yml), which builds
+natively on all three platforms (no cross-compilation) and publishes a GitHub
+prerelease containing the five binaries (`o2a2o-darwin-arm64|x64`,
+`o2a2o-linux-arm64|x64`, `o2a2o-windows-x64.exe`), per-platform installers —
+Windows zip with `install.ps1`; Linux `deb`/`rpm` plus a `.tar.gz` with a
+systemd unit and `install.sh`; macOS `.tar.gz` with a launchd plist — and one
+merged `checksums.txt` covering every asset (one sha256 line each). `bun run
+release:rc` is the local helper for the safe part: it gates on a green test
+suite, a clean tree and tag uniqueness, then tags `v<version>-rc.1` and pushes
+it to trigger CI. Current RC downloads:
+
+https://github.com/fetaoily/o2a2o/releases
 
 ## Docs
 

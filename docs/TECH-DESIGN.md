@@ -530,3 +530,14 @@ bun run release --version 1.0.0 # tag + GitHub Release + assets + checksums
 - **§10 流式响应头时机**：SSE 响应头延迟到胜出 Key 的**首个上游字节**到达后才下发；headers 阶段（连接失败/非 2xx）的错误仍走 JSON 错误响应（M1 错误路径），不产生半开 SSE——重试窗口内对客户端零字节下发。
 - **§8.2 空闲阈值**：无 §19 之外的补充（实现即 §19 修正后的 `idle + grace + idle_check_interval`）。
 - **§7.3 keyId 与 reset 语义**：keyId = 掩码键（`maskKey(key)`），端点 URL 与记账均用掩码，明文 Key 不出池；`/admin/keys/:keyId/reset` 按模型配置顺序取**第一个**拥有该 keyId 的池（首匹配，未命中 404）；reset 归 healthy、清连败与冷却，保留延迟历史与累计失败数——reset 非 opt-out，Key 持续失败仍会在再满 `failure_threshold` 次后重新进入冷却。
+
+## 21. M4 实现勘误（2026-09-22）
+
+以实现与测试为准，对正文四处修正：
+
+- **§11 更新源与拒绝粒度**：发现新版本不走 `/releases/latest`，而是拉取 release **列表**接口过滤（按 `allow_prerelease` 过滤 prerelease、仅取严格大于当前版本的 semver 最高者，`src/update/github-releases.ts`）；校验和为**强制项**——release 缺 `checksums.txt` 资产时结构性拒绝，不下载不替换（正文只写「SHA256 校验」，未写缺文件即拒）。`UpdateResult` 保持 `{ok, rolledBack}` 两字段不变、不携带原因：拒绝原因由 CLI 侧判别渲染——缺校验和资产可由 release 元数据直接识别，输出专门一行（"release has no checksums asset; refusing unverified install"）；其余失败一律输出通用一行（"new binary failed verification; current binary kept"），细节在日志。
+- **§11 Windows 替换与清理时机**：替换序列实为 备份（复制 `.backup`）→ `rename(current → .old)` + `rename(.new → current)` → 自验证（`<binary> --version` 且输出须含新版本号）→ **同一进程内**清理 `.old`/`.backup`（自验证成功即清理，无需重启）；正文「重启后清理 current.old」以实现为准。`.old`/`.backup` 在恢复成功之前不得删除——替换中途死亡（binaryPath 缺失）时从尚存的恢复副本回滚。
+- **§13/§14 发布改为 CI 构建**：§14「`bun run release` 本地 tag + 上传 assets + checksums」未实现；实际为 **tag 触发的 GitHub Actions**（`.github/workflows/release.yml`，push `v*` 即建预发布）：三平台 matrix **原生构建**（macos/ubuntu/windows，无交叉编译），逐平台打包原生安装器（Windows：zip + `install.ps1`；Linux：deb/rpm + 含 systemd unit 与 install.sh 的 tar.gz；macOS：含 launchd plist 的 tar.gz），合并为单一 `checksums.txt`（硬校验 14 行 = 5 二进制 + 9 安装器，资产名固定——更新器按该名获取）后 `gh release create --prerelease` 发布。本地 `scripts/release-rc.mjs`（即 §13 树中的 `scripts/release.ts`）只做门禁（测试绿/树净/tag 唯一）+ 打 tag + push；§13 树中 `src/update/version-checker.ts` 实际为 `src/update/github-releases.ts`。
+- **§7.3 key 掩码公式**：`mask(key) = key.slice(0,8) + "..." + key.slice(-4)` 仅适用长度 > 12 的 key；≤8 全掩码为 `***`（对短 key 取 slice(-4) 会泄漏半数以上字符），9–12 字符输出 `***` + 末 4 位（M2 引入，正文与 §19/§20 均未记录，补记于此）。
+
+其余按正文执行，无进一步偏差。

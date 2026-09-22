@@ -9,11 +9,17 @@
 // Upstream timeout defaults to UPSTREAM_TIMEOUT_MS; callers may pass a
 // calculated timeoutMs instead.
 import type { AppConfig, ApiKeyConfig, FailoverConfig, ModelConfig } from "../config/loader";
-import { resolveFailoverConfig } from "../config/loader";
+import { ConfigError, resolveFailoverConfig } from "../config/loader";
 import { ApiKeyPool } from "./api-key-pool";
 import { log, warn, error, maskKey } from "../utils/logger";
 
 export type Provider = "openai" | "anthropic";
+
+// Thrown by poolFor when a model has neither model keys nor a provider-wide
+// global key. A ConfigError subclass so the health-key inventory can keep such
+// a model as an empty entry (a visible misconfiguration) while every other
+// pool failure — duplicate key id, anything else — propagates loudly.
+export class NoKeysConfigError extends ConfigError {}
 
 export class UpstreamError extends Error {
   constructor(public status: number, public body: unknown) {
@@ -73,7 +79,7 @@ export class KeyPoolRegistry {
         const globalKey = this.cfg.api_keys[model.provider];
         if (globalKey) keys.push({ key: globalKey, priority: 100, weight: 0 });
       }
-      if (!keys.length) throw new Error(`no api key available for provider ${model.provider}`);
+      if (!keys.length) throw new NoKeysConfigError(`no api key available for provider ${model.provider}`);
       pool = new ApiKeyPool(this.failover, keys);
       this.pools.set(model.name, pool);
     }

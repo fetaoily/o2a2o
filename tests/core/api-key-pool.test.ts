@@ -170,9 +170,12 @@ test("cooldown exclusion: a cooling-down key is never selected while now < coold
 
 test("fallback: when every key is cooling down the lowest priority number is forced with fallback=true", () => {
   const c = clk();
-  const a = { key: "sk-fallback-first-aaaaaaaaa-1111", priority: 10 };
-  const b = { key: "sk-fallback-second-bbbbbbbb-2222", priority: 20 };
-  const pool = new ApiKeyPool(cfg(), [a, b], c.now);
+  const a = { key: "sk-fallback-lowest-aaaaaaaa-1111", priority: 10 };
+  const b = { key: "sk-fallback-other-bbbbbbbb-2222", priority: 20 };
+  // a (lowest priority number) is configured SECOND: the fallback scan starts
+  // from entries.first(), so a "return entries.first()" mutation would pick b
+  // and fail the assertion instead of faking a pass.
+  const pool = new ApiKeyPool(cfg(), [b, a], c.now);
   for (let i = 0; i < 3; i++) pool.recordFailure(maskKey(a.key));
   for (let i = 0; i < 3; i++) pool.recordFailure(maskKey(b.key));
   const d = pool.select();
