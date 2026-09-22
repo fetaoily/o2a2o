@@ -1,8 +1,8 @@
 // CLI update command and startup-check tests: fully offline via stubbed
 // UpdateManager instances (no network, no spawns, no real binaries touched).
 import { expect, test } from "bun:test";
-import { VERSION, startupUpdateCheck, updateCommand } from "../../src/cli";
-import type { UpdateConfig } from "../../src/config/loader";
+import { VERSION, startupUpdateCheck, updateCommand, updateFromEnv } from "../../src/cli";
+import { ConfigError, type UpdateConfig } from "../../src/config/loader";
 import type { ReleaseInfo } from "../../src/update/github-releases";
 import type { UpdateManager } from "../../src/update/update-manager";
 
@@ -102,6 +102,66 @@ test("update command: rollback outcome exits 1 with the rolled-back message", as
   try { code = await updateCommand(mgr, true); } finally { cap.restore(); }
   expect(code).toBe(1);
   expect(cap.errors).toContain("update failed, rolled back");
+});
+
+test("update command: a throwing manager.update exits 1 with the message", async () => {
+  const mgr = stubManager(async () => REL, async () => { throw new Error("rmSync temp cleanup boom"); });
+  const cap = capture();
+  let code: number;
+  try { code = await updateCommand(mgr, true); } finally { cap.restore(); }
+  expect(code).toBe(1);
+  expect(cap.errors).toContain("update failed: rmSync temp cleanup boom");
+});
+
+// --- update flow wiring (identity gate + config fallback) -------------------
+
+test("update flow: identity refusal exits 1 and touches neither config nor manager", async () => {
+  let checkCalled = false;
+  let configLoaded = false;
+  const mgr = stubManager(async () => { checkCalled = true; return REL; });
+  const cap = capture();
+  let code: number;
+  try {
+    code = await updateFromEnv({
+      configPath: "./o2a2o.yaml",
+      binaryPath: "/some/bun-or-source",
+      identityFn: () => false,
+      loadConfigFn: async () => { configLoaded = true; return { } as never; },
+      manager: mgr,
+    });
+  } finally { cap.restore(); }
+  expect(code).toBe(1);
+  expect(configLoaded).toBe(false);
+  expect(checkCalled).toBe(false);
+  expect(cap.errors.some((m) =>
+    m.includes("update refused: /some/bun-or-source does not identify as an o2a2o binary") &&
+    m.includes("running from source?"),
+  )).toBe(true);
+});
+
+test("update flow: missing config falls back to update defaults and reaches the release check", async () => {
+  const checkRel: ReleaseInfo[] = [];
+  const mgr = stubManager(
+    async () => { checkRel.push(REL); return REL; },
+    async () => ({ ok: true, rolledBack: false }),
+  );
+  const cap = capture();
+  let code: number;
+  try {
+    code = await updateFromEnv({
+      configPath: "./o2a2o.yaml",
+      binaryPath: "/some/o2a2o",
+      identityFn: () => true,
+      loadConfigFn: async () => { throw new ConfigError("config file not found: ./o2a2o.yaml"); },
+      manager: mgr,
+    });
+  } finally { cap.restore(); }
+  // a fresh no-config install must still be able to self-update: exit 0
+  expect(code).toBe(0);
+  expect(checkRel).toHaveLength(1);
+  expect(cap.errors.some((m) => m.includes("config not loadable, using update defaults"))).toBe(true);
+  expect(cap.errors.some((m) => m.includes("config file not found"))).toBe(true);
+  expect(cap.logs).toContain("updated to 0.4.0");
 });
 
 // --- startup check (check_on_start) ----------------------------------------

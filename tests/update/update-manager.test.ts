@@ -13,7 +13,7 @@ import {
   platformAssetName,
   type ReleaseInfo,
 } from "../../src/update/github-releases";
-import { UpdateManager, type SpawnFn } from "../../src/update/update-manager";
+import { UpdateManager, identifiesAsO2a2o, type SpawnFn } from "../../src/update/update-manager";
 
 // --- offline mock: GitHub releases API + asset bytes -------------------
 
@@ -308,4 +308,34 @@ test("update: failed rollback keeps the recovery copies and reports rolledBack f
   // the POSIX branch never creates one — only .backup holds original bytes
   expect(existsSync(binaryPath + ".old")).toBe(process.platform === "win32");
   expect(existsSync(binaryPath + ".backup")).toBe(true);
+});
+
+// --- identity guard (CLI update preflight) --------------------------------
+
+// IDENTITY only, never version equality: any o2a2o binary — including an
+// older release — is a legitimate update source, so a stale version passes.
+test("identity: o2a2o-brand output passes, including a stale version", () => {
+  for (const stdout of ["o2a2o 0.3.0-rc.1", "o2a2o 0.2.0"]) {
+    const calls: { cmd: string; args: string[] }[] = [];
+    const ok = identifiesAsO2a2o("/some/o2a2o", (cmd, args) => {
+      calls.push({ cmd, args });
+      return { status: 0, stdout, stderr: "" };
+    });
+    expect(ok).toBe(true);
+    expect(calls).toEqual([{ cmd: "/some/o2a2o", args: ["--version"] }]);
+  }
+});
+
+test("identity: output without the o2a2o brand (e.g. bun's version line) is refused", () => {
+  expect(identifiesAsO2a2o(
+    "/some/bun",
+    () => ({ status: 0, stdout: "1.3.7", stderr: "" }),
+  )).toBe(false);
+});
+
+test("identity: nonzero exit is refused even with brand output", () => {
+  expect(identifiesAsO2a2o(
+    "/some/o2a2o",
+    () => ({ status: 1, stdout: "o2a2o 0.3.0-rc.1", stderr: "crash" }),
+  )).toBe(false);
 });

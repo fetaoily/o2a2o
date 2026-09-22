@@ -11,7 +11,7 @@ import { chatToIr, irToChat, type ConvResult } from "./converters/chat";
 import { responsesToIr, irToResponses } from "./converters/responses";
 import { anthropicToIr, irToAnthropic } from "./converters/anthropic";
 import type { ReleaseInfo } from "./update/github-releases";
-import { UpdateManager } from "./update/update-manager";
+import { UpdateManager, identifiesAsO2a2o, type UpdateResult } from "./update/update-manager";
 import pkg from "../package.json";
 
 // Single source of truth: package.json, inlined at bundle time so compiled
@@ -34,7 +34,7 @@ export function parsePort(v: string): number | undefined {
 
 export function parseArgv(argv: string[]): CliCommand {
   const first = argv[0] ?? "";
-  if (first === "version") return { cmd: "version" };
+  if (first === "version" || first === "--version" || first === "-v") return { cmd: "version" };
   if (first === "update") return { cmd: "update" };
   if (first === "config") {
     const sub = argv[1];
@@ -210,7 +210,14 @@ export async function updateCommand(manager: UpdateManager, enabled: boolean): P
     console.log(`already up to date (${VERSION})`);
     return 0;
   }
-  const result = await manager.update(rel);
+  let result: UpdateResult;
+  try { result = await manager.update(rel); }
+  catch (e) {
+    // update() has no no-throw contract (e.g. a cleanup rmSync can throw);
+    // surface the failure instead of letting it escape as an unhandled rejection.
+    console.error(`update failed: ${e instanceof Error ? e.message : String(e)}`);
+    return 1;
+  }
   if (result.ok) {
     console.log(`updated to ${rel.version}`);
     return 0;
@@ -227,6 +234,47 @@ export async function updateCommand(manager: UpdateManager, enabled: boolean): P
     : "new binary failed verification; current binary kept";
   console.error(`update refused: ${reason}`);
   return 1;
+}
+
+// Body of the `update` CLI case with its environment seams injected (identity
+// probe, config loader, manager) so the full wiring — identity gate, config
+// fallback, release check — is testable offline. runCli passes the real seams.
+export async function updateFromEnv(deps: {
+  configPath: string;
+  binaryPath: string;
+  identityFn?: (binaryPath: string) => boolean;
+  loadConfigFn?: (path: string) => Promise<AppConfig>;
+  manager?: UpdateManager;
+}): Promise<number> {
+  // 1. identity gate: only let a binary that identifies as o2a2o self-update.
+  //    IDENTITY only, never a version comparison — an older o2a2o binary is a
+  //    legitimate update source. Without this, `bun run src/index.ts update`
+  //    would probe (and on success overwrite) the bun runtime executable.
+  const identifies = deps.identityFn ?? identifiesAsO2a2o;
+  if (!identifies(deps.binaryPath)) {
+    console.error(
+      `update refused: ${deps.binaryPath} does not identify as an o2a2o binary ` +
+      "(running from source? install a compiled release or build with bun run build:platform)",
+    );
+    return 1;
+  }
+  // 2. config is optional for updating: a fresh install may have no config
+  //    file (or an unresolvable ${ENV} reference), so fall back to the
+  //    update-section defaults instead of refusing to self-update at all.
+  let cfg: AppConfig;
+  try { cfg = await (deps.loadConfigFn ?? loadConfig)(deps.configPath); }
+  catch (e) {
+    console.error(`config not loadable, using update defaults: ${e instanceof Error ? e.message : String(e)}`);
+    cfg = {} as AppConfig;
+  }
+  const uc = resolveUpdateConfig(cfg);
+  const manager = deps.manager ?? new UpdateManager({
+    repo: uc.repo,
+    currentVersion: VERSION,
+    binaryPath: deps.binaryPath,
+    allowPrerelease: uc.allow_prerelease,
+  });
+  return updateCommand(manager, uc.enabled);
 }
 
 // check_on_start notice: one background GitHub Releases query after serve is
@@ -262,24 +310,13 @@ export async function runCli(argv: string[]): Promise<number> {
     }
     case "config": return configCommand(parsed);
     case "convert": return convertCommand(parsed);
-    case "update": {
-      let cfg: AppConfig;
-      try { cfg = await loadConfig(DEFAULT_CONFIG_PATH); }
-      catch (e) {
-        console.error(e instanceof Error ? e.message : String(e));
-        return 1;
-      }
-      const uc = resolveUpdateConfig(cfg);
-      const manager = new UpdateManager({
-        repo: uc.repo,
-        currentVersion: VERSION,
-        binaryPath: process.execPath,
-        allowPrerelease: uc.allow_prerelease,
-      });
-      return updateCommand(manager, uc.enabled);
-    }
+    case "update":
+      return updateFromEnv({ configPath: DEFAULT_CONFIG_PATH, binaryPath: process.execPath });
     case "version":
-      console.log(VERSION);
+      // Intentional version channel: brand + semver on one line. This is what
+      // the updater's self-verify (`<binary> --version` must contain the new
+      // version) and the update identity guard rely on.
+      console.log(`o2a2o ${VERSION}`);
       return 0;
     case "help":
       printUsage();

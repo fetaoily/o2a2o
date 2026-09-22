@@ -14,6 +14,8 @@ test("config subcommands", () => {
 });
 test("version and unknown", () => {
   expect(parseArgv(["version"]).cmd).toBe("version");
+  expect(parseArgv(["--version"]).cmd).toBe("version");
+  expect(parseArgv(["-v"]).cmd).toBe("version");
   expect(parseArgv(["wat"]).cmd).toBe("help");
 });
 test("update parses", () => {

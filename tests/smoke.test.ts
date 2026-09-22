@@ -7,7 +7,7 @@ test("main is callable", () => {
   expect(() => main()).not.toThrow();
 });
 
-test("version prints the running version", async () => {
+test("version prints the branded version line", async () => {
   const logs: string[] = [];
   const origLog = console.log;
   console.log = (...args: unknown[]) => { logs.push(args.join(" ")); };
@@ -18,9 +18,23 @@ test("version prints the running version", async () => {
     console.log = origLog;
   }
   expect(code).toBe(0);
-  // substring match: the exact line shape is pinned where the output format
-  // is defined (src/cli.ts) and tightened in tests/update/cli.test.ts
-  expect(logs.some((l) => l.includes(VERSION))).toBe(true);
+  // brand + semver on one line: the channel the updater's self-verify and the
+  // update identity guard both rely on
+  expect(logs).toContain(`o2a2o ${VERSION}`);
+});
+
+test("--version reaches the version command", async () => {
+  const logs: string[] = [];
+  const origLog = console.log;
+  console.log = (...args: unknown[]) => { logs.push(args.join(" ")); };
+  let code: number;
+  try {
+    code = await runCli(["--version"]);
+  } finally {
+    console.log = origLog;
+  }
+  expect(code).toBe(0);
+  expect(logs).toContain(`o2a2o ${VERSION}`);
 });
 
 test("printed version matches package.json", () => {

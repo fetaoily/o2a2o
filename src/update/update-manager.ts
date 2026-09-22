@@ -61,6 +61,15 @@ function findChecksum(text: string, fileName: string): string | null {
   return null;
 }
 
+// Identity probe for the CLI update preflight: true only when binaryPath is
+// an o2a2o binary, i.e. its `--version` output carries the brand. IDENTITY
+// only, deliberately NOT a version comparison — an older o2a2o binary is a
+// legitimate update source, so its stale version still passes.
+export function identifiesAsO2a2o(binaryPath: string, spawnFn: SpawnFn = defaultSpawnFn): boolean {
+  const r = spawnFn(binaryPath, ["--version"]);
+  return r.status === 0 && r.stdout.includes("o2a2o");
+}
+
 export class UpdateManager {
   // Timestamp of the last check() call (from `now` when provided).
   lastCheckAt: Date | null = null;
