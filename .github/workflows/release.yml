@@ -11,14 +11,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # platform values MUST match the package:<platform> script names in
+          # package.json (mac/win, NOT macos/windows) — pinned by
+          # tests/workflow.test.ts
           - os: macos-latest
-            platform: macos
+            platform: mac
             targets: "darwin-arm64,darwin-x64"
           - os: ubuntu-latest
             platform: linux
             targets: "linux-arm64,linux-x64"
           - os: windows-latest
-            platform: windows
+            platform: win
             targets: "windows-x64"
     runs-on: ${{ matrix.os }}
     steps:
@@ -59,7 +62,9 @@ jobs:
         run: |
           cd artifacts
           cat dist-*/checksums.txt dist-*/installers/checksums.txt > checksums.txt
-          wc -l checksums.txt
+          # hard assertion: 5 binaries + 9 installers — a short count means a
+          # platform artifact was partial or missing, fail before publishing
+          [ "$(wc -l < checksums.txt)" -eq 14 ] || { echo "expected 14 checksum lines, got $(wc -l < checksums.txt)"; exit 1; }
       - name: Create prerelease
         env:
           GH_TOKEN: ${{ github.token }}

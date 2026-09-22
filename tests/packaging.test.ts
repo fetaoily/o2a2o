@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { extractZipEntry, readTarGzEntries, readZipEntries } from "../scripts/lib/archiver";
+import { extractTarGzEntry, extractZipEntry, readTarGzEntries, readZipEntries, writeTarGz } from "../scripts/lib/archiver";
 
 const root = join(import.meta.dir, "..");
 const dist = join(root, "dist");
@@ -34,6 +34,23 @@ const nfpmTool = join(root, "packaging", ".tools", process.platform === "win32" 
 const nfpmAvailable = existsSync(nfpmTool);
 
 const isExec = (mode: number) => (mode & 0o111) !== 0;
+
+// Pure-JS round-trip: no dist needed, runs everywhere including clean CI
+// checkouts (extractTarGzEntry has no other production caller yet — the
+// Linux nfpm acquisition uses it first on CI).
+describe("archiver tar.gz member extraction", () => {
+  test("extractTarGzEntry returns the member's exact bytes", () => {
+    const payload = Buffer.from("binary-bytes-\x00\x01\xff", "latin1");
+    const script = Buffer.from("#!/bin/sh\necho hi\n", "utf8");
+    const gz = writeTarGz([
+      { name: "o2a2o", data: payload, mode: 0o755 },
+      { name: "install.sh", data: script, mode: 0o644 },
+    ]);
+    expect(extractTarGzEntry(gz, "o2a2o").equals(payload)).toBe(true);
+    expect(extractTarGzEntry(gz, "install.sh").equals(script)).toBe(true);
+    expect(() => extractTarGzEntry(gz, "missing")).toThrow(/member not found/);
+  });
+});
 
 // CI runners check out the repo without a build; every test below asserts
 // real dist/ artifacts, so the whole file only runs where dist/installers
