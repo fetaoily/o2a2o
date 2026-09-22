@@ -1,1 +1,3 @@
 packaging/** text eol=lf
+.github/** text eol=lf
+scripts/** text eol=lf
