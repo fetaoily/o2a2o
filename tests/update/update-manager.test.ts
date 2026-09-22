@@ -304,6 +304,8 @@ test("update: failed rollback keeps the recovery copies and reports rolledBack f
   const result = await mgr.update(manualRel("v0.4.0"));
   expect(result).toEqual({ ok: false, rolledBack: false }); // restore did NOT succeed
   expect(readFileSync(binaryPath, "utf8")).toBe(NEW_TEXT); // still the unverified binary
-  expect(existsSync(binaryPath + ".old")).toBe(true); // recovery copies retained
+  // recovery copies retained: the Windows branch parks the original at .old,
+  // the POSIX branch never creates one — only .backup holds original bytes
+  expect(existsSync(binaryPath + ".old")).toBe(process.platform === "win32");
   expect(existsSync(binaryPath + ".backup")).toBe(true);
 });
