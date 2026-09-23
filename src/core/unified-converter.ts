@@ -173,11 +173,11 @@ export async function handleGatewayRequest(
   // The client signal (live-test hardening Task 1) cancels the in-flight
   // upstream fetch on disconnect; a client abort never retries or records.
   const upstreamRes = dynamicKey
-    ? await forwardToUpstream({ provider: targetProvider, endpoint, body: upstreamBody, key: dynamicKey, timeoutMs, signal })
+    ? await forwardToUpstream({ provider: targetProvider, endpoint, body: upstreamBody, key: dynamicKey, timeoutMs, signal, baseUrl: model.base_url })
     : (await forwardWithFailover({
         provider: targetProvider, endpoint, body: upstreamBody,
         registry: KeyPoolRegistry.from(cfg), model, timeoutMs,
-        maxRetries: resolveFailoverConfig(cfg).max_retries, signal,
+        maxRetries: resolveFailoverConfig(cfg).max_retries, signal, baseUrl: model.base_url,
       })).response;
   latencyTracker.record(model.name, Date.now() - start);
   const upstreamJson = await upstreamRes.json() as Record<string, unknown>;
@@ -231,13 +231,14 @@ async function establishUpstreamStream(opts: {
   meta: { id: string; model: string };
   timeouts: TimeoutConfig["stream"];
   signal?: AbortSignal;
+  baseUrl?: string;
 }): Promise<{ kind: "ok"; stream: ReadableStream<Uint8Array> } | { kind: "fail"; error: unknown }> {
   let upstreamRes: Response;
   try {
     upstreamRes = await forwardToUpstream({
       provider: opts.provider, endpoint: opts.endpoint, body: opts.body,
       key: opts.key, timeoutMs: opts.timeoutMs, accept: "text/event-stream",
-      signal: opts.signal,
+      signal: opts.signal, baseUrl: opts.baseUrl,
     });
   } catch (e) {
     return { kind: "fail", error: e };   // headers phase: UpstreamError, network failures, client aborts, ...
@@ -427,6 +428,7 @@ export async function handleGatewayStream(
       meta: streamMeta(outFormat, model.name),
       timeouts: resolveTimeoutConfig(cfg).stream,
       signal,
+      baseUrl: model.base_url,
     });
     // A disconnect during establishment wins over every attempt outcome: the
     // whole request terminates before any retry or accounting decision.

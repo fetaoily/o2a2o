@@ -542,3 +542,10 @@ bun run release --version 1.0.0 # tag + GitHub Release + assets + checksums
 - **Version scheme (version-true RC)**: the repo version IS the release version. During the RC period `package.json` itself carries the prerelease suffix (e.g. `0.3.0-rc.1`); the tag is exactly `v<version>` and installer asset names derive verbatim from it — nothing appends `-rc.1` anywhere (`scripts/release-rc.mjs`, `scripts/package-*.mjs`). With `allow_prerelease: true` an RC install keeps receiving `rc.N` releases and later the stable bump. The `version` command prints `o2a2o <semver>` (brand + version on one line) — the same channel the updater's self-verify (`<binary> --version` output must contain the new version) and the update identity guard rely on.
 
 其余按正文执行，无进一步偏差。
+
+## 22. live-test hardening 实现勘误（2026-09-23）
+
+以实现与测试为准，对正文补记两处语义裁定：
+
+- **§6.2 上游地址（每模型 `base_url`）**：`models[].base_url` 为可选字段，语义裁定为 **SDK 约定的完整前缀（含版本段）**——如智谱 `https://open.bigmodel.cn/api/paas/v4`；网关在其后追加方法路径（网关端点去掉前导 `/v1`，即 `/chat/completions` | `/responses` | `/messages`）。与 `O2A2O_UPSTREAM_*` 的裁定相反：env 与默认值仍是**纯 origin**（无版本段），其后追加完整网关端点（含 `/v1`）——`base_url` 缺省时 env/默认行为逐字节不变。优先级：`model.base_url` > `O2A2O_UPSTREAM_*` > provider 默认。校验在加载期执行（`ConfigError`，serve 与 `config validate` 同源生效）：必须为非空 http(s) URL、不得含 query/hash、去尾部斜杠；URL 构造收敛于 `resolveUpstreamUrl`（`src/core/forwarder.ts`），非流式与流式（建流）两条转发路径均经此透传。
+- **§9/§10 客户端断连（live-test hardening Task 1，已合入）**：请求 signal 直通上游 fetch（`AbortSignal.any` 探测 + 手动回退）。断连是终态：不重试、不记 Key 账、无错误帧（非流式抛 AbortError；流式返回空且立即关闭的 SSE 流）。同一窗口内真实上游超时与客户端断连同时发生时，按断连处理（裁定维持）。

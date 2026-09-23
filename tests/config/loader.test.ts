@@ -125,3 +125,57 @@ test("update section loads explicit values over defaults", async () => {
   expect(u.check_on_start).toBe(true);
   expect(u.allow_prerelease).toBe(true);
 });
+
+// ---------------------------------------------------------------------------
+// Per-model base_url (live-test hardening Task 2)
+// ---------------------------------------------------------------------------
+
+const modelYaml = (base: string): string =>
+  `server: { port: 1, host: "127.0.0.1" }\nmodels: [{ name: "m", provider: "openai", base_url: ${base}, api_keys: [{ key: "k", priority: 1 }] }]\n`;
+
+test("base_url loads normalized: trailing slash stripped", async () => {
+  const p = join(dir, "b1.yaml");
+  writeFileSync(p, modelYaml('"https://open.bigmodel.cn/api/paas/v4/"'));
+  const cfg = await loadConfig(p);
+  expect(cfg.models[0].base_url).toBe("https://open.bigmodel.cn/api/paas/v4");
+});
+
+test("base_url absent stays undefined", async () => {
+  const p = join(dir, "b2.yaml");
+  writeFileSync(p, 'server: { port: 1, host: "127.0.0.1" }\nmodels: [{ name: "m", provider: "openai", api_keys: [{ key: "k", priority: 1 }] }]\n');
+  const cfg = await loadConfig(p);
+  expect(cfg.models[0].base_url).toBeUndefined();
+});
+
+test("base_url resolves ${VAR} environment references", async () => {
+  process.env.O2A2O_TEST_BASE_URL = "https://open.bigmodel.cn/api/paas/v4";
+  try {
+    const p = join(dir, "b3.yaml");
+    writeFileSync(p, modelYaml('"${O2A2O_TEST_BASE_URL}"'));
+    const cfg = await loadConfig(p);
+    expect(cfg.models[0].base_url).toBe("https://open.bigmodel.cn/api/paas/v4");
+  } finally {
+    delete process.env.O2A2O_TEST_BASE_URL;
+  }
+});
+
+test("base_url rejects non-http(s) schemes, query strings, hash fragments, non-strings and empty values", async () => {
+  const bad = [
+    '"ftp://example.com/api/paas/v4"',
+    '"https://example.com/api/paas/v4?x=1"',
+    '"https://example.com/api/paas/v4#frag"',
+    "123",
+    '""',
+  ];
+  for (const [i, base] of bad.entries()) {
+    const p = join(dir, `bad${i}.yaml`);
+    writeFileSync(p, modelYaml(base));
+    await expect(loadConfig(p)).rejects.toThrow(/models\[0\]\.base_url/);
+  }
+});
+
+test("base_url that is not a valid URL at all fails with the field path", async () => {
+  const p = join(dir, "b4.yaml");
+  writeFileSync(p, modelYaml('"not a url"'));
+  await expect(loadConfig(p)).rejects.toThrow(/models\[0\]\.base_url/);
+});

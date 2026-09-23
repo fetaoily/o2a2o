@@ -6,6 +6,10 @@ export const CONFIG_TEMPLATE = `server:
   #                           # clients then send "Authorization: Bearer <token>"
 
 # Models in service. provider: "openai" | "anthropic"
+# base_url (optional): full upstream prefix INCLUDING the version segment,
+# for upstreams whose paths lack /v1. The gateway appends the method path
+# (e.g. /chat/completions). Precedence: model.base_url > O2A2O_UPSTREAM_*
+# env vars > provider default.
 models:
   - name: "gpt-4o"
     provider: "openai"
@@ -20,6 +24,13 @@ models:
     api_keys:
       - key: "\${ANTHROPIC_KEY_1}"
         priority: 1
+# Zhipu (OpenAI-compatible; its endpoint has no /v1 segment) — uncomment to use:
+#  - name: "glm-4.6"
+#    provider: "openai"
+#    base_url: "https://open.bigmodel.cn/api/paas/v4"   # -> /api/paas/v4/chat/completions
+#    api_keys:
+#      - key: "\${ZHIPU_KEY}"
+#        priority: 1
 
 aliases:
   "sonnet": "claude-sonnet-4-5"

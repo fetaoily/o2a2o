@@ -104,6 +104,31 @@ O2A2O_UPSTREAM_OPENAI      default: https://api.openai.com
 O2A2O_UPSTREAM_ANTHROPIC   default: https://api.anthropic.com
 ```
 
+These set the upstream **origin**; the gateway appends the full endpoint path
+(e.g. `/v1/chat/completions`).
+
+### Per-model base_url
+
+Upstreams whose paths lack the `/v1` segment need a per-model `base_url` instead.
+It follows the SDK convention: a **full prefix including the version segment**,
+and the gateway appends only the method path (`/chat/completions`,
+`/responses`, `/messages`):
+
+```yaml
+models:
+  - name: "glm-4.6"
+    provider: "openai"
+    base_url: "https://open.bigmodel.cn/api/paas/v4"   # -> .../api/paas/v4/chat/completions
+    api_keys:
+      - key: "${ZHIPU_KEY}"
+        priority: 1
+```
+
+`base_url` must be a http(s) URL without query string or hash; trailing
+slashes are stripped. Precedence per model: `base_url` > `O2A2O_UPSTREAM_*`
+env var > provider default. Models without `base_url` keep the env/default
+behavior unchanged.
+
 ## Multi-key failover and health (M3)
 
 Each model's configured keys form one health pool, tuned by the `failover` config

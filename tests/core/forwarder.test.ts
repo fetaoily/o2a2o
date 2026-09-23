@@ -1,7 +1,7 @@
 import { test, expect, mock, beforeEach, afterEach } from "bun:test";
 import {
   forwardToUpstream, forwardWithFailover, isRetryableUpstreamError,
-  KeyPoolRegistry, UpstreamError,
+  KeyPoolRegistry, UpstreamError, resolveUpstreamUrl,
 } from "../../src/core/forwarder";
 import { handleGatewayRequest } from "../../src/core/unified-converter";
 import { ParamError } from "../../src/converters/chat";
@@ -484,4 +484,97 @@ test("forwardToUpstream sends provider-correct headers; non-2xx throws UpstreamE
     expect((e as UpstreamError).status).toBe(429);
   }
   delete process.env.O2A2O_UPSTREAM_ANTHROPIC;
+});
+
+// ---------------------------------------------------------------------------
+// Per-model base_url (live-test hardening Task 2): upstream URL construction
+// ---------------------------------------------------------------------------
+
+const withOpenAiEnv = async (value: string | undefined, run: () => Promise<void>): Promise<void> => {
+  const prev = process.env.O2A2O_UPSTREAM_OPENAI;
+  try {
+    if (value === undefined) delete process.env.O2A2O_UPSTREAM_OPENAI;
+    else process.env.O2A2O_UPSTREAM_OPENAI = value;
+    await run();
+  } finally {
+    if (prev === undefined) delete process.env.O2A2O_UPSTREAM_OPENAI;
+    else process.env.O2A2O_UPSTREAM_OPENAI = prev;
+  }
+};
+
+test("resolveUpstreamUrl: base_url supplies the full prefix, the endpoint's /v1 segment is dropped", () => {
+  // Zhipu shape: the version segment lives inside the prefix, not in /v1.
+  expect(resolveUpstreamUrl({ provider: "openai", endpoint: "/v1/chat/completions", baseUrl: "https://open.bigmodel.cn/api/paas/v4" }))
+    .toBe("https://open.bigmodel.cn/api/paas/v4/chat/completions");
+  expect(resolveUpstreamUrl({ provider: "openai", endpoint: "/v1/responses", baseUrl: "https://open.bigmodel.cn/api/paas/v4" }))
+    .toBe("https://open.bigmodel.cn/api/paas/v4/responses");
+  expect(resolveUpstreamUrl({ provider: "anthropic", endpoint: "/v1/messages", baseUrl: "https://compat.example.com/anthropic/v1" }))
+    .toBe("https://compat.example.com/anthropic/v1/messages");
+});
+
+test("resolveUpstreamUrl: trailing slashes on base_url are stripped", () => {
+  expect(resolveUpstreamUrl({ provider: "openai", endpoint: "/v1/chat/completions", baseUrl: "https://open.bigmodel.cn/api/paas/v4/" }))
+    .toBe("https://open.bigmodel.cn/api/paas/v4/chat/completions");
+});
+
+test("resolveUpstreamUrl: without base_url, env override and default origins keep the historical byte-for-byte shape", async () => {
+  await withOpenAiEnv(undefined, async () => {
+    expect(resolveUpstreamUrl({ provider: "openai", endpoint: "/v1/chat/completions" }))
+      .toBe("https://api.openai.com/v1/chat/completions");
+  });
+  await withOpenAiEnv("http://proxy:9", async () => {
+    expect(resolveUpstreamUrl({ provider: "openai", endpoint: "/v1/responses" }))
+      .toBe("http://proxy:9/v1/responses");
+  });
+});
+
+// URL-capturing fetch mock: records each call's URL and answers via handler.
+function captureUrlFetch(handler: (n: number) => Response): { urls: () => string[] } {
+  const urls: string[] = [];
+  global.fetch = (async (url: unknown, _init: any) => {
+    urls.push(String(url));
+    return handler(urls.length);
+  }) as any;
+  return { urls: () => urls };
+}
+
+test("forwardToUpstream posts to the model's base_url prefix when given", async () => {
+  const { urls } = captureUrlFetch(() => okRes());
+  await forwardToUpstream({
+    provider: "openai", endpoint: "/v1/chat/completions", body: {},
+    key: K_CONFIG, baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+  });
+  expect(urls()).toEqual(["https://open.bigmodel.cn/api/paas/v4/chat/completions"]);
+});
+
+test("forwardWithFailover threads baseUrl through every attempt", async () => {
+  const cfg = regCfg();
+  const { urls } = captureUrlFetch((n) => (n === 1 ? errRes(429, { error: "rate limited" }) : okRes()));
+  await forwardWithFailover({
+    ...FO, body: { model: "gpt-4o" }, registry: new KeyPoolRegistry(cfg),
+    model: cfg.models[0], timeoutMs: 1000, maxRetries: 3,
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+  });
+  expect(urls()).toEqual([
+    "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+  ]);
+});
+
+test("gateway request with a model base_url hits the non-/v1 path; base_url wins over the env override", async () => {
+  await withOpenAiEnv("http://env-override-host:5678", async () => {
+    const cfg = dynCfg();
+    cfg.models[0].base_url = "http://base-url-host:1234/api/paas/v4";
+    const { urls } = captureUrlFetch(() => okRes());
+    await handleGatewayRequest(cfg, CHAT_PATH, chatBody(), {});
+    expect(urls()).toEqual(["http://base-url-host:1234/api/paas/v4/chat/completions"]);
+  });
+});
+
+test("gateway request with a dynamic key forwards through the model's base_url too", async () => {
+  const cfg = dynCfg();
+  cfg.models[0].base_url = "http://base-url-host:1234/api/paas/v4";
+  const { urls } = captureUrlFetch(() => okRes());
+  await handleGatewayRequest(cfg, CHAT_PATH, chatBody(), { "x-o2a2o-openai-key": K_HDR });
+  expect(urls()).toEqual(["http://base-url-host:1234/api/paas/v4/chat/completions"]);
 });

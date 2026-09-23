@@ -650,3 +650,83 @@ test("M3 health/reset: auth_token gate covers both endpoints", async () => {
     ag.stop(true);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Per-model base_url (live-test hardening Task 2): upstream prefix without /v1
+// ---------------------------------------------------------------------------
+
+// Zhipu-style upstream: the OpenAI-compatible API lives under
+// /api/paas/v4/chat/completions — no /v1 segment anywhere. Records the paths
+// it was hit on so the test can assert the gateway neither prepends nor
+// preserves /v1 for a base_url model.
+function startZhipuLikeUpstream() {
+  const seen: string[] = [];
+  const up = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    async fetch(req) {
+      seen.push(new URL(req.url).pathname);
+      const body = await req.json() as any;
+      if (body.stream === true)
+        return new Response(openaiSseFixture, { headers: { "content-type": "text/event-stream" } });
+      return Response.json({
+        id: "chatcmpl-z", object: "chat.completion", created: 1, model: body.model,
+        choices: [{ index: 0, message: { role: "assistant", content: "from-zhipu" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+    },
+  });
+  return { up, seen };
+}
+
+test("base_url: model with a non-/v1 upstream prefix serves end to end (Zhipu shape)", async () => {
+  const { up, seen } = startZhipuLikeUpstream();
+  const cfg: AppConfig = {
+    ...cfgBase,
+    models: [{
+      name: "glm-4.6", provider: "openai",
+      base_url: `http://127.0.0.1:${up.port}/api/paas/v4`,
+      api_keys: [{ key: "sk-zhipu", priority: 1 }],
+    }],
+    aliases: {}, api_keys: {},
+  };
+  const bgw = startGateway(cfg);
+  try {
+    const res = await fetch(`http://127.0.0.1:${bgw.port}/v1/chat/completions`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.choices[0].message.content).toBe("from-zhipu");
+    expect(seen).toEqual(["/api/paas/v4/chat/completions"]);   // no /v1 injected
+  } finally {
+    bgw.stop(true);
+    up.stop(true);
+  }
+});
+
+test("base_url: streaming requests reach the custom prefix and pass through", async () => {
+  const { up, seen } = startZhipuLikeUpstream();
+  const cfg: AppConfig = {
+    ...cfgBase,
+    models: [{
+      name: "glm-4.6", provider: "openai",
+      base_url: `http://127.0.0.1:${up.port}/api/paas/v4`,
+      api_keys: [{ key: "sk-zhipu", priority: 1 }],
+    }],
+    aliases: {}, api_keys: {},
+  };
+  const bgw = startGateway(cfg);
+  try {
+    const res = await fetch(`http://127.0.0.1:${bgw.port}/v1/chat/completions`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "hi" }], stream: true }),
+    });
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    expect(await res.text()).toBe(openaiSseFixture);           // byte-identical passthrough
+    expect(seen).toEqual(["/api/paas/v4/chat/completions"]);
+  } finally {
+    bgw.stop(true);
+    up.stop(true);
+  }
+});

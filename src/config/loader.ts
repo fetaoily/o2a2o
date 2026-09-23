@@ -6,7 +6,10 @@ export class ConfigError extends Error {
 }
 
 export interface ApiKeyConfig { key: string; priority: number; weight?: number }
-export interface ModelConfig { name: string; provider: "openai" | "anthropic"; api_keys: ApiKeyConfig[] }
+// base_url (optional, per model): the FULL upstream prefix including its
+// version segment (SDK convention), e.g. Zhipu's "https://open.bigmodel.cn/api/paas/v4".
+// When absent the provider's env override / default origin serves the request.
+export interface ModelConfig { name: string; provider: "openai" | "anthropic"; api_keys: ApiKeyConfig[]; base_url?: string }
 export interface ServerConfig { port: number; host: string; log_level: string; auth_token?: string }
 export interface TimeoutConfig {
   non_stream: {
@@ -84,7 +87,28 @@ export async function loadConfig(path: string): Promise<AppConfig> {
   cfg.models ??= [];
   cfg.aliases ??= {};
   cfg.api_keys ??= {};
+  for (const [i, m] of cfg.models.entries()) {
+    const base = validateBaseUrl(m.base_url, `models[${i}].base_url`);
+    if (base !== undefined) m.base_url = base;
+  }
   return cfg;
+}
+
+// model.base_url validation (live-test hardening Task 2): must be a non-empty
+// http(s) URL without query string or hash. Normalized in place: trailing
+// slashes stripped, so appending the method path cannot double up.
+function validateBaseUrl(value: unknown, path: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value === "")
+    throw new ConfigError(`${path} must be a non-empty http(s) URL`);
+  let url: URL;
+  try { url = new URL(value); }
+  catch { throw new ConfigError(`${path} is not a valid URL: ${value}`); }
+  if (url.protocol !== "http:" && url.protocol !== "https:")
+    throw new ConfigError(`${path} must be an http(s) URL: ${value}`);
+  if (url.search || url.hash)
+    throw new ConfigError(`${path} must not contain a query string or hash: ${value}`);
+  return value.replace(/\/+$/, "");
 }
 
 const TIMEOUT_DEFAULTS: TimeoutConfig = {

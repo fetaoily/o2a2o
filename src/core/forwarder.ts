@@ -53,6 +53,23 @@ export function upstreamBase(provider: Provider): string {
     : (process.env.O2A2O_UPSTREAM_ANTHROPIC ?? "https://api.anthropic.com");
 }
 
+// Gateway method endpoints. With a per-model base_url the leading "/v1" is
+// dropped and the remainder is appended to the base (live-test hardening
+// Task 2).
+export type GatewayEndpoint = "/v1/chat/completions" | "/v1/responses" | "/v1/messages";
+
+// The single upstream URL choke point. Without base_url the provider's env
+// override / default origin (origin only, no version segment) is joined with
+// the full gateway endpoint — byte-for-byte the historical shape. With a
+// base_url the model supplies the FULL prefix including its version segment
+// (SDK convention, e.g. Zhipu's "https://open.bigmodel.cn/api/paas/v4") and
+// the endpoint contributes its method path without "/v1". Precedence:
+// model.base_url > O2A2O_UPSTREAM_* env override > provider default.
+export function resolveUpstreamUrl(opts: { provider: Provider; endpoint: GatewayEndpoint; baseUrl?: string }): string {
+  if (!opts.baseUrl) return upstreamBase(opts.provider) + opts.endpoint;
+  return opts.baseUrl.replace(/\/+$/, "") + opts.endpoint.replace(/^\/v1/, "");
+}
+
 // Cross-key retry classification (D4): network failures and 5xx/429/401/403
 // switch keys; every other UpstreamError (4xx) and any non-upstream error
 // (ParamError etc.) surfaces to the caller immediately. The stream path (M3
@@ -111,7 +128,7 @@ export class KeyPoolRegistry {
 // without recording (UpstreamError keeps the failing attempt's status/body).
 export async function forwardWithFailover(opts: {
   provider: Provider;
-  endpoint: "/v1/chat/completions" | "/v1/responses" | "/v1/messages";
+  endpoint: GatewayEndpoint;
   body: Record<string, unknown>;
   registry: KeyPoolRegistry;
   model: ModelConfig;
@@ -119,6 +136,7 @@ export async function forwardWithFailover(opts: {
   maxRetries: number;
   accept?: string;
   signal?: AbortSignal;
+  baseUrl?: string;
 }): Promise<{ response: Response; keyId: string; fallback: boolean }> {
   const pool = opts.registry.poolFor(opts.model); // throws when no key is configured at all
   let lastError: unknown;
@@ -134,6 +152,7 @@ export async function forwardWithFailover(opts: {
       const response = await forwardToUpstream({
         provider: opts.provider, endpoint: opts.endpoint, body: opts.body,
         key: decision.key, timeoutMs: opts.timeoutMs, accept: opts.accept, signal: opts.signal,
+        baseUrl: opts.baseUrl,
       });
       pool.recordSuccess(decision.keyId, Date.now() - start);
       return { response, keyId: decision.keyId, fallback: decision.fallback };
@@ -156,12 +175,13 @@ export async function forwardWithFailover(opts: {
 
 export async function forwardToUpstream(opts: {
   provider: Provider;
-  endpoint: "/v1/chat/completions" | "/v1/responses" | "/v1/messages";
+  endpoint: GatewayEndpoint;
   body: Record<string, unknown>;
   key: string;
   timeoutMs?: number;
   accept?: string;
   signal?: AbortSignal;
+  baseUrl?: string;
 }): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? UPSTREAM_TIMEOUT_MS);
@@ -186,7 +206,7 @@ export async function forwardToUpstream(opts: {
       : { "authorization": `Bearer ${opts.key}`, "content-type": "application/json" };
     if (opts.accept) headers.accept = opts.accept;
     log(`${opts.provider} POST ${opts.endpoint} key=${maskKey(opts.key)}`);
-    const res = await fetch(upstreamBase(opts.provider) + opts.endpoint, {
+    const res = await fetch(resolveUpstreamUrl({ provider: opts.provider, endpoint: opts.endpoint, baseUrl: opts.baseUrl }), {
       method: "POST", headers, body: JSON.stringify(opts.body), signal: wireSignal,
     });
     if (!res.ok) {
