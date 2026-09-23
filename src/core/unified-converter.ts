@@ -152,6 +152,7 @@ export async function handleGatewayRequest(
   path: string,
   body: Record<string, unknown>,
   headers: Record<string, string | undefined>,
+  signal?: AbortSignal,
 ): Promise<GatewayOutcome> {
   const { format, outFormat, targetProvider, model, dynamicKey, upstreamBody, dropped, endpoint } =
     resolveRoute(cfg, path, body, headers, wantsStreaming(body));
@@ -169,12 +170,14 @@ export async function handleGatewayRequest(
   // A dynamic key makes a single per-request attempt with no pool accounting;
   // otherwise the model's pool picks per attempt and failover runs on retryable
   // errors (M3). The model-level latency record feeds TimeoutCalculator either way.
+  // The client signal (live-test hardening Task 1) cancels the in-flight
+  // upstream fetch on disconnect; a client abort never retries or records.
   const upstreamRes = dynamicKey
-    ? await forwardToUpstream({ provider: targetProvider, endpoint, body: upstreamBody, key: dynamicKey, timeoutMs })
+    ? await forwardToUpstream({ provider: targetProvider, endpoint, body: upstreamBody, key: dynamicKey, timeoutMs, signal })
     : (await forwardWithFailover({
         provider: targetProvider, endpoint, body: upstreamBody,
         registry: KeyPoolRegistry.from(cfg), model, timeoutMs,
-        maxRetries: resolveFailoverConfig(cfg).max_retries,
+        maxRetries: resolveFailoverConfig(cfg).max_retries, signal,
       })).response;
   latencyTracker.record(model.name, Date.now() - start);
   const upstreamJson = await upstreamRes.json() as Record<string, unknown>;
@@ -227,15 +230,17 @@ async function establishUpstreamStream(opts: {
   dstFormat: InputFormat;
   meta: { id: string; model: string };
   timeouts: TimeoutConfig["stream"];
+  signal?: AbortSignal;
 }): Promise<{ kind: "ok"; stream: ReadableStream<Uint8Array> } | { kind: "fail"; error: unknown }> {
   let upstreamRes: Response;
   try {
     upstreamRes = await forwardToUpstream({
       provider: opts.provider, endpoint: opts.endpoint, body: opts.body,
       key: opts.key, timeoutMs: opts.timeoutMs, accept: "text/event-stream",
+      signal: opts.signal,
     });
   } catch (e) {
-    return { kind: "fail", error: e };   // headers phase: UpstreamError, network failures, ...
+    return { kind: "fail", error: e };   // headers phase: UpstreamError, network failures, client aborts, ...
   }
   const source = upstreamRes.body;
   if (!source) return { kind: "fail", error: new Error("upstream returned an empty body for a streaming request") };
@@ -254,6 +259,7 @@ async function establishUpstreamStream(opts: {
   const reader = inner.getReader();
   const output = new TextEncoder();
   let timedOut = false;
+  let aborted = false;
   let outController: ReadableStreamDefaultController<Uint8Array> | undefined;
   let failure: StreamTimeoutError | undefined;
   let first: Awaited<ReturnType<typeof reader.read>> | undefined;
@@ -261,7 +267,27 @@ async function establishUpstreamStream(opts: {
   let wake: () => void = () => {};
   const settled = new Promise<void>((resolve) => { wake = resolve; });
 
+  // Client-disconnect wiring (live-test hardening Task 1): the request signal
+  // tears the attempt down in either phase. Pre-first-byte: cancel the inner
+  // reader and wake the establishment race — the caller sees the aborted
+  // signal and terminates the whole request (no retry, no accounting, no
+  // error frame; the client is gone). Post-first-byte: disarm the monitor,
+  // cancel the conversion-chain reader (which propagates to the upstream
+  // body) and close the client stream safely. The {once:true} listener is
+  // removed on every non-abort exit path (monitor fire, pull done, pull
+  // error, downstream cancel).
+  const onAbort = () => {
+    aborted = true;
+    monitor.disarm();
+    void reader.cancel().catch(() => {});
+    try { outController?.close(); } catch { /* already closed */ }
+    wake();
+  };
+  const removeAbortListener = () => opts.signal?.removeEventListener("abort", onAbort);
+  opts.signal?.addEventListener("abort", onAbort, { once: true });
+
   monitor.arm((err) => {
+    removeAbortListener();
     if (outController) {
       // Post-first-byte fire (idle/total, D5): the client holds the error
       // frame and the close; late upstream data is dropped.
@@ -282,8 +308,8 @@ async function establishUpstreamStream(opts: {
     wake();
   })();
   await settled;
-  if (failure) return { kind: "fail", error: failure };
-  if (readError !== undefined) return { kind: "fail", error: readError };
+  if (failure) { removeAbortListener(); return { kind: "fail", error: failure }; }
+  if (readError !== undefined) { removeAbortListener(); return { kind: "fail", error: readError }; }
 
   let pending = first;
   const stream = new ReadableStream<Uint8Array>({
@@ -295,16 +321,21 @@ async function establishUpstreamStream(opts: {
         try {
           chunk = await reader.read();
         } catch (e) {
+          removeAbortListener();
           monitor.disarm();
           controller.error(e);
           return;
         }
       }
-      if (timedOut) return;              // client already holds the error frame + close
-      if (chunk.done) { controller.close(); return; }
+      // timedOut: the client already holds the error frame + close.
+      // aborted: onAbort closed this controller; a pull that was in flight
+      // when the abort fired must not touch the closed controller again.
+      if (timedOut || aborted) return;
+      if (chunk.done) { removeAbortListener(); controller.close(); return; }
       controller.enqueue(chunk.value);
     },
     cancel(reason) {
+      removeAbortListener();
       monitor.disarm();
       return reader.cancel(reason);
     },
@@ -346,15 +377,29 @@ function errorFrameStream(dstFormat: InputFormat, message: string): ReadableStre
 // Exhaustion renders a single first_packet error frame + close (M2 encoding
 // path); every other terminal failure throws into the M1 error path, which
 // renders UpstreamError as a JSON error response.
+// A client disconnect (live-test hardening Task 1) terminates the whole
+// request at any point in the loop: no retry, no key accounting, no error
+// frame — the outcome is an empty, immediately-closed stream.
 export async function handleGatewayStream(
   cfg: AppConfig,
   path: string,
   body: Record<string, unknown>,
   headers: Record<string, string | undefined>,
+  signal?: AbortSignal,
 ): Promise<GatewayStreamOutcome | GatewayOutcome> {
   const { format, outFormat, targetProvider, model, dynamicKey, upstreamBody, dropped, endpoint } =
     resolveRoute(cfg, path, body, headers, wantsStreaming(body));
   if (dropped?.length) warn(`dropped unsupported params: ${dropped.join(",")}`);
+
+  // A disconnected client gets an empty, immediately-closed SSE stream: no
+  // error frame (nothing renders for a client that is gone), no retry, no key
+  // accounting (a client disconnect is not an upstream fault).
+  const emptyClosedStream = (): GatewayStreamOutcome => ({
+    status: 200,
+    stream: new ReadableStream<Uint8Array>({ start(c) { c.close(); } }),
+    contentType: "text/event-stream",
+    droppedParams: dropped,
+  });
 
   // Streams carry no token estimate; by_model overrides and the latency
   // feedback still bound the time to upstream response headers.
@@ -369,6 +414,7 @@ export async function handleGatewayStream(
 
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt++) {
+    if (signal?.aborted) return emptyClosedStream();
     pool?.maybeRecover();
     const decision = pool ? pool.select() : undefined;
     const start = Date.now();
@@ -380,7 +426,11 @@ export async function handleGatewayStream(
       dstFormat: outFormat,
       meta: streamMeta(outFormat, model.name),
       timeouts: resolveTimeoutConfig(cfg).stream,
+      signal,
     });
+    // A disconnect during establishment wins over every attempt outcome: the
+    // whole request terminates before any retry or accounting decision.
+    if (signal?.aborted) return emptyClosedStream();
     if (established.kind === "ok") {
       // The winning key's first-packet latency feeds its own scoring samples;
       // the model-level latencyTracker stays non-stream-only so stream TTFB

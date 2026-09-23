@@ -364,6 +364,99 @@ test("no key anywhere surfaces 'no api key available' from the gateway request",
     .rejects.toThrow(/no api key available for provider anthropic/);
 });
 
+// ---------------------------------------------------------------------------
+// Client-disconnect signal wiring (live-test hardening Task 1)
+// ---------------------------------------------------------------------------
+
+// Fetch mock standing in for a hung upstream: records every call, returns a
+// promise that only rejects when the request signal aborts (an AbortError,
+// exactly what a real aborted fetch produces). Exposes the signal each call
+// received so tests can assert the client signal was composed into it.
+function hangingFetch(): { calls: () => number; signalOfCall: (n: number) => AbortSignal | undefined } {
+  let calls = 0;
+  const signals: (AbortSignal | undefined)[] = [];
+  global.fetch = (async (_url: unknown, init: any) => {
+    calls += 1;
+    signals.push(init.signal as AbortSignal | undefined);
+    return new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+    });
+  }) as any;
+  return { calls: () => calls, signalOfCall: (n) => signals[n - 1] };
+}
+
+test("client signal pre-aborted: no upstream attempt, AbortError, no key accounting", async () => {
+  const cfg = regCfg();
+  const registry = new KeyPoolRegistry(cfg);
+  const ac = new AbortController();
+  ac.abort();
+  const hf = hangingFetch();
+  await expect(forwardWithFailover({
+    ...FO, body: { model: "gpt-4o" }, registry, model: cfg.models[0],
+    timeoutMs: 1000, maxRetries: 3, signal: ac.signal,
+  })).rejects.toMatchObject({ name: "AbortError" });
+  expect(hf.calls()).toBe(0);
+  const snap = registry.poolFor(cfg.models[0]).snapshot();
+  expect(snap[maskKey(K_PRIMARY)].totalFailures).toBe(0);
+  expect(snap[maskKey(K_SECONDARY)].totalFailures).toBe(0);
+});
+
+test("client abort mid-fetch: single attempt, composed signal fires, no retry no accounting", async () => {
+  const cfg = regCfg();
+  const registry = new KeyPoolRegistry(cfg);
+  const ac = new AbortController();
+  const hf = hangingFetch();
+  const p = forwardWithFailover({
+    ...FO, body: { model: "gpt-4o" }, registry, model: cfg.models[0],
+    // Short timeout so a RED run (composition missing) fails fast instead of
+    // hanging on the never-settling mock; the abort lands well inside it.
+    timeoutMs: 400, maxRetries: 3, signal: ac.signal,
+  });
+  await Bun.sleep(20); // the attempt is in flight when the client goes away
+  ac.abort();
+  await expect(p).rejects.toMatchObject({ name: "AbortError" });
+  expect(hf.calls()).toBe(1); // no key switch, no second attempt
+  expect(hf.signalOfCall(1)?.aborted).toBe(true); // the fetch saw the abort
+  const snap = registry.poolFor(cfg.models[0]).snapshot();
+  expect(snap[maskKey(K_PRIMARY)].totalFailures).toBe(0);
+  expect(snap[maskKey(K_SECONDARY)].totalFailures).toBe(0);
+});
+
+test("timeout AbortError without a client signal still retries and records failures (classification pin)", async () => {
+  // The contrast case for the pin above: a plain AbortError (no client signal
+  // in play) keeps the D4 timeout semantics — retry on the next key and demote.
+  const cfg = regCfg();
+  const registry = new KeyPoolRegistry(cfg);
+  let calls = 0;
+  global.fetch = (async () => {
+    calls += 1;
+    const e = new Error("The operation was aborted.");
+    e.name = "AbortError";
+    throw e;
+  }) as any;
+  await expect(forwardWithFailover({
+    ...FO, body: { model: "gpt-4o" }, registry, model: cfg.models[0],
+    timeoutMs: 1000, maxRetries: 2,
+  })).rejects.toMatchObject({ name: "AbortError" });
+  expect(calls).toBe(2); // retried across keys
+  const snap = registry.poolFor(cfg.models[0]).snapshot();
+  expect(snap[maskKey(K_PRIMARY)].totalFailures).toBe(1);
+  expect(snap[maskKey(K_SECONDARY)].totalFailures).toBe(1);
+});
+
+test("forwardToUpstream passes the client signal through so the upstream fetch is cancelled", async () => {
+  const ac = new AbortController();
+  const hf = hangingFetch();
+  const p = forwardToUpstream({
+    provider: "openai", endpoint: "/v1/chat/completions", body: { model: "m" },
+    key: K_CONFIG, timeoutMs: 400, signal: ac.signal,
+  });
+  await Bun.sleep(20);
+  ac.abort();
+  await expect(p).rejects.toMatchObject({ name: "AbortError" });
+  expect(hf.signalOfCall(1)?.aborted).toBe(true);
+});
+
 beforeEach(() => { mock.restore(); });
 // global.fetch is assigned directly below; mock.restore() does not undo direct
 // assignments, so restore it explicitly to keep the leak out of later test files.

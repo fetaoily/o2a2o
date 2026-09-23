@@ -30,6 +30,23 @@ export class UpstreamError extends Error {
 
 export const UPSTREAM_TIMEOUT_MS = 60_000;
 
+// Runtime capability probe (live-test hardening Task 1): AbortSignal.any
+// composes the client signal with the per-request timeout controller natively.
+// Verified available on Bun 1.3.7; a runtime without it falls back to a manual
+// {once:true} listener forwarded onto the timeout controller.
+const HAS_ABORT_SIGNAL_ANY =
+  typeof AbortSignal === "function" && typeof AbortSignal.any === "function";
+
+// A client disconnect surfaced as a terminal abort. Distinct from the timeout
+// abort only by decision site: the request signal fired, so the retry loop
+// must neither retry nor touch key accounting (a client disconnect is not an
+// upstream fault).
+export function clientAbortError(): Error {
+  const e = new Error("client disconnected");
+  e.name = "AbortError";
+  return e;
+}
+
 export function upstreamBase(provider: Provider): string {
   return provider === "openai"
     ? (process.env.O2A2O_UPSTREAM_OPENAI ?? "https://api.openai.com")
@@ -101,11 +118,14 @@ export async function forwardWithFailover(opts: {
   timeoutMs: number;
   maxRetries: number;
   accept?: string;
+  signal?: AbortSignal;
 }): Promise<{ response: Response; keyId: string; fallback: boolean }> {
   const pool = opts.registry.poolFor(opts.model); // throws when no key is configured at all
   let lastError: unknown;
   const attempts = Math.max(1, opts.maxRetries); // always at least one attempt
   for (let attempt = 0; attempt < attempts; attempt++) {
+    // A client disconnect is terminal: no attempt, no retry, no accounting.
+    if (opts.signal?.aborted) throw clientAbortError();
     pool.maybeRecover();
     const decision = pool.select();
     if (decision.fallback) warn(`all keys cooling down: force-trying ${decision.keyId}`);
@@ -113,12 +133,17 @@ export async function forwardWithFailover(opts: {
     try {
       const response = await forwardToUpstream({
         provider: opts.provider, endpoint: opts.endpoint, body: opts.body,
-        key: decision.key, timeoutMs: opts.timeoutMs, accept: opts.accept,
+        key: decision.key, timeoutMs: opts.timeoutMs, accept: opts.accept, signal: opts.signal,
       });
       pool.recordSuccess(decision.keyId, Date.now() - start);
       return { response, keyId: decision.keyId, fallback: decision.fallback };
     } catch (e) {
       lastError = e;
+      // A client disconnect is not an upstream fault (controller ruling).
+      // Checked BEFORE the retry classification so an abort can never reach
+      // isRetryableUpstreamError's AbortError branch (which would demote the
+      // key): no retry, no max_retries consumption, no accounting.
+      if (opts.signal?.aborted) throw clientAbortError();
       // Retryable errors are key-level (network/timeout/5xx/429/401/403, D4):
       // they demote the key. Request-level errors (400/422 etc.) are not the
       // key's fault — throw without recording so client 400s never cool a key.
@@ -136,9 +161,25 @@ export async function forwardToUpstream(opts: {
   key: string;
   timeoutMs?: number;
   accept?: string;
+  signal?: AbortSignal;
 }): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? UPSTREAM_TIMEOUT_MS);
+  // Client signal composition: the fetch must observe whichever of the timeout
+  // or the client signal fires first. AbortSignal.any when the runtime has it
+  // (probed above); otherwise a {once:true} listener forwards the client abort
+  // onto the timeout controller and is removed in finally.
+  let wireSignal: AbortSignal = controller.signal;
+  let onClientAbort: (() => void) | undefined;
+  if (opts.signal) {
+    if (HAS_ABORT_SIGNAL_ANY) {
+      wireSignal = AbortSignal.any([controller.signal, opts.signal]);
+    } else {
+      onClientAbort = () => controller.abort(opts.signal?.reason);
+      if (opts.signal.aborted) onClientAbort();
+      else opts.signal.addEventListener("abort", onClientAbort, { once: true });
+    }
+  }
   try {
     const headers: Record<string, string> = opts.provider === "anthropic"
       ? { "x-api-key": opts.key, "anthropic-version": "2023-06-01", "content-type": "application/json" }
@@ -146,7 +187,7 @@ export async function forwardToUpstream(opts: {
     if (opts.accept) headers.accept = opts.accept;
     log(`${opts.provider} POST ${opts.endpoint} key=${maskKey(opts.key)}`);
     const res = await fetch(upstreamBase(opts.provider) + opts.endpoint, {
-      method: "POST", headers, body: JSON.stringify(opts.body), signal: controller.signal,
+      method: "POST", headers, body: JSON.stringify(opts.body), signal: wireSignal,
     });
     if (!res.ok) {
       error(`${opts.provider} ${opts.endpoint} upstream status ${res.status} key=${maskKey(opts.key)}`);
@@ -158,5 +199,8 @@ export async function forwardToUpstream(opts: {
       warn(`${opts.provider} ${opts.endpoint} upstream failure key=${maskKey(opts.key)}: ${e instanceof Error ? e.message : String(e)}`);
     }
     throw e;
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    if (onClientAbort) opts.signal?.removeEventListener("abort", onClientAbort);
+  }
 }

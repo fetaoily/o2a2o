@@ -49,10 +49,12 @@ export function startGateway(cfg: AppConfig): ReturnType<typeof Bun.serve> {
           // Stream-truthy requests take the M2 streaming path (1:1: a
           // streaming client always gets a streaming upstream call); the
           // error catch below also covers it — upstream non-2xx throws
-          // before the stream is established.
+          // before the stream is established. req.signal (live-test
+          // hardening Task 1) lets a disconnecting client cancel the
+          // upstream work instead of the gateway pumping a dead socket.
           const out = wantsStreaming(body)
-            ? await handleGatewayStream(cfg, url.pathname, body, headers)
-            : await handleGatewayRequest(cfg, url.pathname, body, headers);
+            ? await handleGatewayStream(cfg, url.pathname, body, headers, req.signal)
+            : await handleGatewayRequest(cfg, url.pathname, body, headers, req.signal);
           if ("stream" in out) {
             const h: Record<string, string> = {
               "content-type": out.contentType,
