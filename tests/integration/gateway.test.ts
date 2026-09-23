@@ -876,6 +876,25 @@ test("upstream_format chat: streaming responses inbound sends the chat SSE upstr
   }
 });
 
+test("upstream_format chat: chat inbound still passes through untouched (the override never fires on the chat path)", async () => {
+  const { up, seen } = startFormatSpyUpstream();
+  const ogw = startGateway(formatOverrideCfg(up, "chat"));
+  try {
+    const res = await fetch(`http://127.0.0.1:${ogw.port}/v1/chat/completions`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "hi" }], presence_penalty: 0.5 }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json() as any).choices[0].message.content).toBe("from-zhipu");
+    expect(seen.map((s) => s.path)).toEqual(["/api/paas/v4/chat/completions"]);
+    expect(seen[0].body.presence_penalty).toBe(0.5);           // untouched body: no chatToIr->irToChat round-trip
+    expect(res.headers.get("x-o2a2o-dropped")).toBeNull();     // nothing reported dropped
+  } finally {
+    ogw.stop(true);
+    up.stop(true);
+  }
+});
+
 test("upstream_format control: without the override, responses inbound still passes through to /responses byte-identically", async () => {
   const { up, seen } = startFormatSpyUpstream();
   const ogw = startGateway(formatOverrideCfg(up));             // no upstream_format
