@@ -107,3 +107,13 @@ resolveUpstreamUrl(opts: { provider: Provider; endpoint: GatewayEndpoint; baseUr
 - **占位符扫描**：AbortSignal.any 可用性留运行期探测并记录（实现细节非设计缺口）；其余接口/语义均已给出精确值。
 - **类型一致性**：`signal?: AbortSignal` 逐层可选透传（server 为唯一必源头）；`resolveUpstreamUrl` 的 endpoint 类型与现有 forwardToUpstream 一致；base_url 优先级不改 env 语义 ✓。
 - **裁定**：客户端中止零记账零重试（防 Key 健康被客户端行为污染）；建流阶段中止整单终止不渲染错误帧；base_url 用 SDK 约定而非改 env 语义（零破坏）；CI 只断言机制契约，崩溃存活属实机验收。
+
+## Final Review Corrections (recorded post-execution)
+
+Whole-branch review (4e6bd38..1a4c79a, 3 commits) verdict: READY TO MERGE, zero Critical/Important. Resolutions and facts worth keeping:
+
+- **Finding 3 was a false alarm**: the non-stream latency feed has existed since M3 (498fdbb, `forwardWithFailover` feeds `Date.now() - start` on 2xx). The live `avgLatency: 0` was a test-ordering artifact — `/health/keys` was queried as the first request in a freshly restarted process, so the pool had zero samples. Task 3 landed as mutation-verified pinning tests + a TECH-DESIGN §22 latency-semantics line; no production change.
+- **All three rulings verified surviving integration** (not merely plausibly): the abort check is ordered before failure classification at every decision site in both forward paths and both stream phases, so a client abort can never reach the retryable-AbortError branch, consume retries, or touch key health; the composed signal never marks the client signal, making timeout/abort cross-contamination structurally impossible.
+- **Adversarial evidence beyond CI**: the reviewer ran 5 rounds of two parallel aborted SSE streams against the real gateway — 10/10 upstream body cancels observed, zero crashes (this was the exact deterministic segfault shape from the original incident). Empirically, on Bun the composed signal also cancels an in-flight `res.json()` mid-body, so the headers→json "gap" exists only on the unused manual fallback path.
+- **Deferred minors (next batch fodder)**: pin the dual-abort crash shape as a CI test; log the resolved upstream URL at debug level so a mistyped `base_url` is traceable; label client-abort distinctly in the failure warn line; adopt the `GatewayEndpoint` alias; trailing `?`/`#` rejection in base_url validation (currently a loud upstream 404, never silent); non-array `models` error-message polish.
+- **Update/RC-release path untouched**: `git diff 4e6bd38..1a4c79a -- src/update scripts .github package.json` is empty.
