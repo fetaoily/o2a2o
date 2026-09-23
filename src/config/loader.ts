@@ -9,7 +9,18 @@ export interface ApiKeyConfig { key: string; priority: number; weight?: number }
 // base_url (optional, per model): the FULL upstream prefix including its
 // version segment (SDK convention), e.g. Zhipu's "https://open.bigmodel.cn/api/paas/v4".
 // When absent the provider's env override / default origin serves the request.
-export interface ModelConfig { name: string; provider: "openai" | "anthropic"; api_keys: ApiKeyConfig[]; base_url?: string }
+// upstream_format (optional, per model, openai only): forces the upstream wire
+// protocol to "chat". Set it on OpenAI-compatible upstreams that serve only
+// /v1/chat/completions (e.g. Zhipu's /api/paas/v4, whose /v1/responses 404s):
+// inbound /v1/responses requests then convert through the IR to the chat
+// protocol instead of passing through.
+export interface ModelConfig {
+  name: string;
+  provider: "openai" | "anthropic";
+  api_keys: ApiKeyConfig[];
+  base_url?: string;
+  upstream_format?: "chat";
+}
 export interface ServerConfig { port: number; host: string; log_level: string; auth_token?: string }
 export interface TimeoutConfig {
   non_stream: {
@@ -88,10 +99,24 @@ export async function loadConfig(path: string): Promise<AppConfig> {
   cfg.aliases ??= {};
   cfg.api_keys ??= {};
   for (const [i, m] of cfg.models.entries()) {
+    validateUpstreamFormat(m, `models[${i}].upstream_format`);
     const base = validateBaseUrl(m.base_url, `models[${i}].base_url`);
     if (base !== undefined) m.base_url = base;
   }
   return cfg;
+}
+
+// model.upstream_format validation: the only supported override is "chat", and
+// only on an openai-provider model (on anthropic it would change the auth
+// header semantics). Any other value — including "responses", whose outbound
+// request encoder does not exist yet — is a config error with the field path.
+function validateUpstreamFormat(m: ModelConfig, path: string): void {
+  const v: unknown = m.upstream_format; // raw YAML content, untrusted
+  if (v === undefined) return;
+  if (m.provider !== "openai")
+    throw new ConfigError(`${path} is only supported on provider "openai" models`);
+  if (v !== "chat")
+    throw new ConfigError(`${path} must be "chat" when set (got ${JSON.stringify(v)})`);
 }
 
 // model.base_url validation (live-test hardening Task 2): must be a non-empty

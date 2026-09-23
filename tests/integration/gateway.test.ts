@@ -776,3 +776,119 @@ test("base_url: streaming requests reach the custom prefix and pass through", as
     up.stop(true);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Per-model upstream_format: "chat" (finding 4): chat-only openai upstreams
+// (Zhipu /api/paas/v4 — no /v1/responses) serve inbound /v1/responses via the
+// IR conversion path to the chat endpoint, instead of the same-provider
+// passthrough to an upstream /v1/responses that would 404. base_url and
+// upstream_format are orthogonal and stack, mirroring the real Zhipu shape.
+// ---------------------------------------------------------------------------
+
+// Serves the chat shape under /chat/completions and the responses shape under
+// /responses, recording every hit's path + parsed body so the tests can assert
+// which endpoint and wire format the gateway actually chose.
+function startFormatSpyUpstream() {
+  const seen: { path: string; body: any }[] = [];
+  const up = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    async fetch(req) {
+      const path = new URL(req.url).pathname;
+      const body = await req.json() as any;
+      seen.push({ path, body });
+      if (path.endsWith("/responses")) {
+        if (body.stream === true)
+          return new Response(responsesSseFixture, { headers: { "content-type": "text/event-stream" } });
+        return Response.json({
+          id: "resp_z", object: "response", created_at: 1, model: body.model, status: "completed",
+          output: [{ id: "msg_z", type: "message", role: "assistant", status: "completed",
+            content: [{ type: "output_text", text: "from-responses", annotations: [] }] }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        });
+      }
+      if (body.stream === true)
+        return new Response(openaiSseFixture, { headers: { "content-type": "text/event-stream" } });
+      return Response.json({
+        id: "chatcmpl-z", object: "chat.completion", created: 1, model: body.model,
+        choices: [{ index: 0, message: { role: "assistant", content: "from-zhipu" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+    },
+  });
+  return { up, seen };
+}
+
+const formatOverrideCfg = (up: { port: number | undefined }, upstreamFormat?: "chat"): AppConfig => ({
+  ...cfgBase,
+  models: [{
+    name: "glm-4.6", provider: "openai",
+    base_url: `http://127.0.0.1:${up.port}/api/paas/v4`,
+    ...(upstreamFormat ? { upstream_format: upstreamFormat } : {}),
+    api_keys: [{ key: "sk-zhipu", priority: 1 }],
+  }],
+  aliases: {}, api_keys: {},
+});
+
+test("upstream_format chat: responses inbound hits the chat endpoint with a chat body, client sees responses output", async () => {
+  const { up, seen } = startFormatSpyUpstream();
+  const ogw = startGateway(formatOverrideCfg(up, "chat"));
+  try {
+    const res = await fetch(`http://127.0.0.1:${ogw.port}/v1/responses`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "glm-4.6", input: "hi", max_output_tokens: 77 }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.object).toBe("response");
+    expect(body.output[0].content[0].type).toBe("output_text");
+    expect(body.output[0].content[0].text).toBe("from-zhipu");
+    expect(seen.map((s) => s.path)).toEqual(["/api/paas/v4/chat/completions"]); // never /responses
+    const sent = seen[0].body;
+    expect(Array.isArray(sent.messages)).toBe(true);           // chat wire shape
+    expect(sent.input).toBeUndefined();
+    expect(sent.max_tokens).toBe(77);                          // max_output_tokens mapped through the IR
+    expect(sent.model).toBe("glm-4.6");
+  } finally {
+    ogw.stop(true);
+    up.stop(true);
+  }
+});
+
+test("upstream_format chat: streaming responses inbound sends the chat SSE upstream and emits responses frames", async () => {
+  const { up, seen } = startFormatSpyUpstream();
+  const ogw = startGateway(formatOverrideCfg(up, "chat"));
+  try {
+    const res = await fetch(`http://127.0.0.1:${ogw.port}/v1/responses`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "glm-4.6", input: "hi", stream: true }),
+    });
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    const text = await res.text();
+    expect(seen.map((s) => s.path)).toEqual(["/api/paas/v4/chat/completions"]);
+    expect(seen[0].body.stream).toBe(true);                    // upstream got the SSE chat request
+    expect(text).toContain('"type":"response.output_text.delta"');
+    expect(text).toContain("stream-hello");
+    expect(text).toContain('"type":"response.completed"');
+    expect(text).not.toContain("chat.completion.chunk");       // no raw chat frames leak to the client
+  } finally {
+    ogw.stop(true);
+    up.stop(true);
+  }
+});
+
+test("upstream_format control: without the override, responses inbound still passes through to /responses byte-identically", async () => {
+  const { up, seen } = startFormatSpyUpstream();
+  const ogw = startGateway(formatOverrideCfg(up));             // no upstream_format
+  try {
+    const res = await fetch(`http://127.0.0.1:${ogw.port}/v1/responses`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "glm-4.6", input: "hi", stream: true }),
+    });
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    expect(await res.text()).toBe(responsesSseFixture);        // byte-identical passthrough
+    expect(seen.map((s) => s.path)).toEqual(["/api/paas/v4/responses"]);
+  } finally {
+    ogw.stop(true);
+    up.stop(true);
+  }
+});

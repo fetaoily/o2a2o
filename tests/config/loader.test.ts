@@ -179,3 +179,33 @@ test("base_url that is not a valid URL at all fails with the field path", async 
   writeFileSync(p, modelYaml('"not a url"'));
   await expect(loadConfig(p)).rejects.toThrow(/models\[0\]\.base_url/);
 });
+
+// ---------------------------------------------------------------------------
+// Per-model upstream_format (finding 4): the only override is "chat" on an
+// openai-provider model; anything else is a ConfigError with the field path.
+// ---------------------------------------------------------------------------
+
+const ufYaml = (model: string): string =>
+  `server: { port: 1, host: "127.0.0.1" }\nmodels: [${model}]\n`;
+
+test("upstream_format: chat loads on an openai model", async () => {
+  const p = join(dir, "u1.yaml");
+  writeFileSync(p, ufYaml('{ name: "m", provider: "openai", upstream_format: "chat", api_keys: [{ key: "k", priority: 1 }] }'));
+  const cfg = await loadConfig(p);
+  expect(cfg.models[0].upstream_format).toBe("chat");
+});
+
+test("upstream_format: values other than chat fail with the field path", async () => {
+  const bad = ['"responses"', '"xml"', "true", "123"];
+  for (const [i, v] of bad.entries()) {
+    const p = join(dir, `uf-bad${i}.yaml`);
+    writeFileSync(p, ufYaml(`{ name: "m", provider: "openai", upstream_format: ${v}, api_keys: [{ key: "k", priority: 1 }] }`));
+    await expect(loadConfig(p)).rejects.toThrow(/models\[0\]\.upstream_format/);
+  }
+});
+
+test("upstream_format: rejected on an anthropic model", async () => {
+  const p = join(dir, "uf-ant.yaml");
+  writeFileSync(p, ufYaml('{ name: "m", provider: "anthropic", upstream_format: "chat", api_keys: [{ key: "k", priority: 1 }] }'));
+  await expect(loadConfig(p)).rejects.toThrow(/models\[0\]\.upstream_format/);
+});

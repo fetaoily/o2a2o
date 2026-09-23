@@ -3,8 +3,10 @@
 // conversion so o2a2o_keys never enters any converter (a dynamic key is used
 // per-request with no pool accounting; otherwise the model's key pool chooses
 // at forward time, M3), convert through the IR only when source and target
-// providers differ (same-provider bodies pass through untouched with the alias
-// rewritten to the canonical model name), forward, then render the upstream
+// providers differ, or a per-model upstream_format override forces a
+// same-provider protocol change (otherwise same-provider bodies pass through
+// untouched with the alias rewritten to the canonical model name), forward,
+// then render the upstream
 // response in the requested output format (FR-2: client format by default,
 // x-o2a2o-output-format override supported).
 // The detect/alias/model/key/request-conversion prefix is shared verbatim by
@@ -80,6 +82,7 @@ interface ResolvedRoute {
   upstreamBody: Record<string, unknown>;
   dropped: string[] | undefined;
   endpoint: "/v1/chat/completions" | "/v1/responses" | "/v1/messages";
+  chatOverride: boolean;           // model.upstream_format === "chat" + responses inbound: the upstream speaks chat
 }
 
 // Shared first half of both gateway paths: detect, output-format override
@@ -118,7 +121,13 @@ function resolveRoute(
 
   let upstreamBody: Record<string, unknown>;
   let dropped: string[] | undefined;
-  if (targetProvider === sourceProvider) {
+  // Per-model upstream_format override: "chat" on an openai model converts
+  // inbound openai_responses requests through the IR to the chat protocol
+  // instead of the same-provider passthrough, for chat-only upstreams whose
+  // /v1/responses endpoint does not exist (e.g. Zhipu /api/paas/v4). Config
+  // validation restricts the override to openai models.
+  const chatOverride = model.upstream_format === "chat" && format === "openai_responses";
+  if (targetProvider === sourceProvider && !chatOverride) {
     upstreamBody = { ...cleanBody, model: model.name };          // passthrough; alias -> canonical name
   } else {
     const conv = TO_IR[format](cleanBody);                       // { ir, dropped } | throws ParamError
@@ -130,21 +139,23 @@ function resolveRoute(
   }
   if (wantsStream) upstreamBody = { ...upstreamBody, stream: true };
   const endpoint = targetProvider === "anthropic" ? "/v1/messages"
-    : (format === "openai_responses" && targetProvider === "openai") ? "/v1/responses"
+    : (format === "openai_responses" && targetProvider === "openai" && !chatOverride) ? "/v1/responses"
     : "/v1/chat/completions";
   // note: cross-provider to openai always targets /v1/chat/completions
-  // (responses-target conversion from anthropic source is format-level, not provider-level)
+  // (responses-target conversion from anthropic source is format-level, not provider-level);
+  // the upstream_format: "chat" override lands here for the same reason
 
-  return { format, outFormat, targetProvider, model, dynamicKey, upstreamBody, dropped, endpoint };
+  return { format, outFormat, targetProvider, model, dynamicKey, upstreamBody, dropped, endpoint, chatOverride };
 }
 
 // The wire shape the upstream natively produces for the endpoint chosen by
 // resolveRoute. Serves both the non-stream response conversion and the
-// streaming path's source-format choice.
-function nativeFormatOf(targetProvider: Provider, format: InputFormat): InputFormat {
-  return targetProvider === "anthropic"
-    ? "anthropic"
-    : format === "openai_responses" ? "openai_responses" : "openai_chat";
+// streaming path's source-format choice. chatOverride: the model's
+// upstream_format forced the chat endpoint, so the upstream produces chat.
+function nativeFormatOf(targetProvider: Provider, format: InputFormat, chatOverride?: boolean): InputFormat {
+  if (targetProvider === "anthropic") return "anthropic";
+  if (chatOverride) return "openai_chat";
+  return format === "openai_responses" ? "openai_responses" : "openai_chat";
 }
 
 export async function handleGatewayRequest(
@@ -154,7 +165,7 @@ export async function handleGatewayRequest(
   headers: Record<string, string | undefined>,
   signal?: AbortSignal,
 ): Promise<GatewayOutcome> {
-  const { format, outFormat, targetProvider, model, dynamicKey, upstreamBody, dropped, endpoint } =
+  const { format, outFormat, targetProvider, model, dynamicKey, upstreamBody, dropped, endpoint, chatOverride } =
     resolveRoute(cfg, path, body, headers, wantsStreaming(body));
 
   // Dynamic non-stream timeout (spec §8.1): estimate from the client body's
@@ -182,7 +193,7 @@ export async function handleGatewayRequest(
   latencyTracker.record(model.name, Date.now() - start);
   const upstreamJson = await upstreamRes.json() as Record<string, unknown>;
 
-  const nativeFormat = nativeFormatOf(targetProvider, format);
+  const nativeFormat = nativeFormatOf(targetProvider, format, chatOverride);
 
   if (dropped?.length) warn(`dropped unsupported params: ${dropped.join(",")}`);
   if (outFormat === nativeFormat) return { status: 200, body: upstreamJson, droppedParams: dropped };
@@ -388,7 +399,7 @@ export async function handleGatewayStream(
   headers: Record<string, string | undefined>,
   signal?: AbortSignal,
 ): Promise<GatewayStreamOutcome | GatewayOutcome> {
-  const { format, outFormat, targetProvider, model, dynamicKey, upstreamBody, dropped, endpoint } =
+  const { format, outFormat, targetProvider, model, dynamicKey, upstreamBody, dropped, endpoint, chatOverride } =
     resolveRoute(cfg, path, body, headers, wantsStreaming(body));
   if (dropped?.length) warn(`dropped unsupported params: ${dropped.join(",")}`);
 
@@ -405,7 +416,7 @@ export async function handleGatewayStream(
   // Streams carry no token estimate; by_model overrides and the latency
   // feedback still bound the time to upstream response headers.
   const timeoutMs = calculateTimeout({ model: model.name, maxTokens: 0, isStream: true, tc: resolveTimeoutConfig(cfg) });
-  const srcFormat = nativeFormatOf(targetProvider, format);
+  const srcFormat = nativeFormatOf(targetProvider, format, chatOverride);
   // A dynamic key makes a single per-request attempt with no pool interaction
   // (non-stream mirror); configured keys establish through the pool's
   // pre-first-packet failover loop. poolFor throws when neither model keys nor

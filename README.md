@@ -129,6 +129,32 @@ slashes are stripped. Precedence per model: `base_url` > `O2A2O_UPSTREAM_*`
 env var > provider default. Models without `base_url` keep the env/default
 behavior unchanged.
 
+### Per-model upstream_format
+
+Some OpenAI-compatible upstreams only serve `/v1/chat/completions` and have no
+`/v1/responses` endpoint (e.g. Zhipu's `/api/paas/v4`, where a Responses request
+would 404). Setting `upstream_format: "chat"` on such a model makes inbound
+`/v1/responses` requests convert through the IR to the chat protocol instead of
+passing through, so Responses-shaped clients work against chat-only upstreams:
+
+```yaml
+models:
+  - name: "glm-4.6"
+    provider: "openai"
+    base_url: "https://open.bigmodel.cn/api/paas/v4"
+    upstream_format: "chat"   # /v1/responses inbound -> /chat/completions + chat body
+    api_keys:
+      - key: "${ZHIPU_KEY}"
+        priority: 1
+```
+
+Only `"chat"` is supported, and only on `provider: "openai"` models; any other
+value (including `"responses"`) or an anthropic model fails config validation.
+Models without the field keep the same-provider passthrough unchanged. It
+stacks with `base_url`: the request still goes to the model's own prefix, just
+to `/chat/completions` with a chat body, and chat responses/streams are
+converted back to the client's requested output format.
+
 ## Multi-key failover and health (M3)
 
 Each model's configured keys form one health pool, tuned by the `failover` config

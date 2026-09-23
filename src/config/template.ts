@@ -28,6 +28,7 @@ models:
 #  - name: "glm-4.6"
 #    provider: "openai"
 #    base_url: "https://open.bigmodel.cn/api/paas/v4"   # -> /api/paas/v4/chat/completions
+#    upstream_format: "chat"   # chat-only upstream: inbound /v1/responses converts to chat
 #    api_keys:
 #      - key: "\${ZHIPU_KEY}"
 #        priority: 1
