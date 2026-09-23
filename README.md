@@ -271,3 +271,4 @@ https://github.com/fetaoily/o2a2o/releases
 
 - [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — requirements and acceptance scenarios
 - [docs/TECH-DESIGN.md](docs/TECH-DESIGN.md) — technical design (IR, routing, key model)
+- [docs/TESTING.md](docs/TESTING.md) — live smoke-test manual: run the full endpoint battery against a real upstream before a release
