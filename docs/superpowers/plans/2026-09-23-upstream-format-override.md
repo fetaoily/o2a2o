@@ -53,3 +53,9 @@ interface ModelConfig { /* 既有 */ upstream_format?: "chat" }
 - **占位符扫描**：无。chat→responses 的 SSE 转换器存在性属实现期核验（M2 交付全 6 方向，缺则升格为发现）。
 - **类型一致性**：`"chat"` 单值枚举与 irToChat 既有出站编码器对齐 ✓。
 - **裁定**：仅开放 "chat"（irToResponsesRequest 不存在，YAGNI）；anthropic provider 禁设（避免 auth 头语义歧义）；流式 srcFormat 跟随覆盖（nativeFormatOf 单点修改）。
+
+## Final Review Corrections (recorded post-execution)
+
+- Task review found one Important (test-hardening, code correct): the `&& format === "openai_responses"` clause guarding chatOverride was mutation-unguarded — dropping it would silently IR-round-trip chat inbound requests and strip 13+ passthrough params via the DROPPED list with only a warn. Fixed in fix round 1 (801bcd0): one discriminating integration test (chat inbound + presence_penalty to an override model asserts the untouched body at the chat path and no dropped header); implementer performed a real mutation check (dropping the clause fails exactly this test).
+- Deferred: absent-override byte-identical control exists streaming-only (non-stream control is implied by the override test's mirror).
+- chat→responses SSE conversion needed no new code — the M2 convertStream hub (parseChatChunk → ResponsesStreamEncoder) already covered the direction.
