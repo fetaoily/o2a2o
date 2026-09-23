@@ -255,6 +255,26 @@ test("successful attempts feed key latency accounting", async () => {
   expect(snap[maskKey(K_SECONDARY)].totalFailures).toBe(0);
 });
 
+test("successful attempts record the measured upstream latency, not a constant", async () => {
+  // live-test hardening Task 3: the value handed to recordSuccess must be the
+  // measured attempt duration (t0 before fetch -> 2xx arrival), so a delayed
+  // mock upstream yields a sample inside the delay..timeout window. A zero or
+  // a fabricated constant (e.g. the timeout itself) fails this pin.
+  const cfg = regCfg();
+  global.fetch = (async () => {
+    await Bun.sleep(30);
+    return okRes();
+  }) as any;
+  const registry = new KeyPoolRegistry(cfg);
+  await forwardWithFailover({
+    ...FO, body: { model: "gpt-4o" }, registry,
+    model: cfg.models[0], timeoutMs: 1000, maxRetries: 3,
+  });
+  const sample = registry.poolFor(cfg.models[0]).snapshot()[maskKey(K_PRIMARY)].latencySamples[0];
+  expect(sample).toBeGreaterThanOrEqual(30); // timers never fire early
+  expect(sample).toBeLessThan(1000);         // measured, not the timeoutMs
+});
+
 test("all keys cooling: the fallback key serves with fallback=true", async () => {
   // failure_threshold 1 + long cooldown: request 1 burns both keys (500 then
   // 429, retries exhausted), request 2 force-tries the lowest priority number.

@@ -705,6 +705,52 @@ test("base_url: model with a non-/v1 upstream prefix serves end to end (Zhipu sh
   }
 });
 
+// ---------------------------------------------------------------------------
+// Non-stream latency accounting (live-test hardening Task 3): a successful
+// non-stream request feeds its measured upstream latency into the key pool,
+// so /health/keys reports a nonzero avgLatency
+// ---------------------------------------------------------------------------
+
+test("non-stream success feeds measured latency into /health/keys avgLatency", async () => {
+  // ~30ms-delayed non-stream upstream: the live-tested symptom was avgLatency
+  // staying at 0 after successful non-stream requests; the recorded sample
+  // must reflect the measured upstream response-headers time instead.
+  const delayedUp = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    async fetch(req) {
+      const body = await req.json() as any;
+      if (body.stream === true)
+        return new Response(openaiSseFixture, { headers: { "content-type": "text/event-stream" } });
+      await Bun.sleep(30);
+      return Response.json({
+        id: "chatcmpl-d", object: "chat.completion", created: 1, model: body.model,
+        choices: [{ index: 0, message: { role: "assistant", content: "from-delayed" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+    },
+  });
+  // Fresh cfg object -> fresh KeyPoolRegistry -> untouched pool (WeakMap cache).
+  const cfg: AppConfig = {
+    ...cfgBase,
+    models: [{ name: "gpt-4o", provider: "openai", api_keys: [{ key: "sk-delayed", priority: 1 }] }],
+    aliases: {}, api_keys: {},
+  };
+  const dgw = startGateway(cfg);
+  const prevUp = process.env.O2A2O_UPSTREAM_OPENAI;
+  process.env.O2A2O_UPSTREAM_OPENAI = `http://127.0.0.1:${delayedUp.port}`;
+  try {
+    const res = await postFo(dgw.port, { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] });
+    expect(res.status).toBe(200);
+    expect((await res.json() as any).choices[0].message.content).toBe("from-delayed");
+    const health = await (await fetch(`http://127.0.0.1:${dgw.port}/health/keys`)).json() as any;
+    expect(health.models["gpt-4o"][maskKey("sk-delayed")].avgLatency).toBeGreaterThan(0);
+  } finally {
+    dgw.stop(true);
+    delayedUp.stop(true);
+    process.env.O2A2O_UPSTREAM_OPENAI = prevUp;
+  }
+});
+
 test("base_url: streaming requests reach the custom prefix and pass through", async () => {
   const { up, seen } = startZhipuLikeUpstream();
   const cfg: AppConfig = {
