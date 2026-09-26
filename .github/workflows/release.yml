@@ -67,12 +67,23 @@ jobs:
           # hard assertion: 5 binaries + 9 installers — a short count means a
           # platform artifact was partial or missing, fail before publishing
           [ "$(wc -l < checksums.txt)" -eq 14 ] || { echo "expected 14 checksum lines, got $(wc -l < checksums.txt)"; exit 1; }
-      - name: Create prerelease
+      - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --prerelease \
-            --title "${{ github.ref_name }} (Release Candidate)" \
-            --notes "RC build for testing - not stable. Verify the assets against checksums.txt (sha256, one line per asset; run sha256sum -c from inside the download directory). The built-in o2a2o update command can consume this release when allow_prerelease is true under update in the config." \
-            artifacts/dist-*/o2a2o-* artifacts/dist-*/installers/o2a2o_* artifacts/checksums.txt
+          # rc tags (vX.Y.Z-rc.N) publish as prereleases; any other v* tag is a
+          # stable release. The updater consumes both: fetchLatestRelease picks
+          # prereleases only when allow_prerelease is set, stable always lists.
+          if [[ "$GITHUB_REF_NAME" =~ -rc\. ]]; then
+            gh release create "$GITHUB_REF_NAME" \
+              --prerelease \
+              --title "$GITHUB_REF_NAME (Release Candidate)" \
+              --notes "RC build for testing - not stable. Verify the assets against checksums.txt (sha256, one line per asset; run sha256sum -c from inside the download directory). The built-in o2a2o update command can consume this release when allow_prerelease is true under update in the config." \
+              artifacts/dist-*/o2a2o-* artifacts/dist-*/installers/o2a2o_* artifacts/checksums.txt
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "o2a2o $GITHUB_REF_NAME" \
+              --notes "Stable release. Verify the assets against checksums.txt (sha256, one line per asset; run sha256sum -c from inside the download directory). The built-in o2a2o update command upgrades to this release (o2a2o update)." \
+              artifacts/dist-*/o2a2o-* artifacts/dist-*/installers/o2a2o_* artifacts/checksums.txt
+          fi

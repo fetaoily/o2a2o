@@ -37,3 +37,18 @@ describe("release.yml permissions", () => {
     expect(job).toContain("permissions:\n      contents: write");
   });
 });
+
+describe("release.yml flavor gating", () => {
+  const step = () => release.slice(release.indexOf("Create release"));
+
+  test("rc gate exists and --prerelease appears exactly once", () => {
+    expect(release).toMatch(/=~ -rc\\\./);
+    expect(step().match(/--prerelease/g)?.length).toBe(1);
+  });
+
+  test("stable branch publishes without the prerelease flag or RC title", () => {
+    const stable = step().slice(step().indexOf("else"));
+    expect(stable).not.toContain("--prerelease");
+    expect(stable).not.toContain("Release Candidate");
+  });
+});
