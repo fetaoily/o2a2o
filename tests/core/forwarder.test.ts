@@ -257,22 +257,24 @@ test("successful attempts feed key latency accounting", async () => {
 
 test("successful attempts record the measured upstream latency, not a constant", async () => {
   // live-test hardening Task 3: the value handed to recordSuccess must be the
-  // measured attempt duration (t0 before fetch -> 2xx arrival), so a delayed
-  // mock upstream yields a sample inside the delay..timeout window. A zero or
-  // a fabricated constant (e.g. the timeout itself) fails this pin.
+  // measured attempt duration (t0 before fetch -> 2xx arrival). The clock is
+  // injected so the pin is exact instead of timing-bound: a constant-zero
+  // feed or a fabricated constant (e.g. the timeout itself) still fails it.
+  // (Realtime Date.now + Bun.sleep flaked here on ubuntu CI 2026-09-26 —
+  // NTP steps the realtime clock under the monotonic sleep.)
   const cfg = regCfg();
-  global.fetch = (async () => {
-    await Bun.sleep(30);
-    return okRes();
-  }) as any;
+  global.fetch = okRes as any;
+  let t = 1_000;
+  const clock = () => (t += 40); // two calls: start -> 1040, success -> 1080
   const registry = new KeyPoolRegistry(cfg);
   await forwardWithFailover({
     ...FO, body: { model: "gpt-4o" }, registry,
-    model: cfg.models[0], timeoutMs: 1000, maxRetries: 3,
+    model: cfg.models[0], timeoutMs: 1000, maxRetries: 3, now: clock,
   });
   const sample = registry.poolFor(cfg.models[0]).snapshot()[maskKey(K_PRIMARY)].latencySamples[0];
-  expect(sample).toBeGreaterThanOrEqual(30); // timers never fire early
-  expect(sample).toBeLessThan(1000);         // measured, not the timeoutMs
+  expect(sample).toBe(40);    // measured delta of the injected clock
+  expect(sample).not.toBe(0);        // not a constant zero
+  expect(sample).not.toBe(1000);     // not the timeoutMs
 });
 
 test("all keys cooling: the fallback key serves with fallback=true", async () => {

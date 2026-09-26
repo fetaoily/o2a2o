@@ -137,6 +137,8 @@ export async function forwardWithFailover(opts: {
   accept?: string;
   signal?: AbortSignal;
   baseUrl?: string;
+  /** Latency clock for pool scoring samples; injectable for deterministic tests. */
+  now?: () => number;
 }): Promise<{ response: Response; keyId: string; fallback: boolean }> {
   const pool = opts.registry.poolFor(opts.model); // throws when no key is configured at all
   let lastError: unknown;
@@ -147,14 +149,18 @@ export async function forwardWithFailover(opts: {
     pool.maybeRecover();
     const decision = pool.select();
     if (decision.fallback) warn(`all keys cooling down: force-trying ${decision.keyId}`);
-    const start = Date.now();
+    // Injectable clock for the latency measurement (same seam as the pool's
+    // `now`): Date.now is realtime and ubuntu runners NTP-step it, so real-
+    // time assertions on the sample flake in CI (2026-09-26). Default keeps
+    // production behavior identical.
+    const start = (opts.now ?? Date.now)();
     try {
       const response = await forwardToUpstream({
         provider: opts.provider, endpoint: opts.endpoint, body: opts.body,
         key: decision.key, timeoutMs: opts.timeoutMs, accept: opts.accept, signal: opts.signal,
         baseUrl: opts.baseUrl,
       });
-      pool.recordSuccess(decision.keyId, Date.now() - start);
+      pool.recordSuccess(decision.keyId, (opts.now ?? Date.now)() - start);
       return { response, keyId: decision.keyId, fallback: decision.fallback };
     } catch (e) {
       lastError = e;
