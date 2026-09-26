@@ -1,6 +1,6 @@
 {
   "name": "o2a2o",
-  "version": "0.3.0-rc.3",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
